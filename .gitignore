@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Environment Variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# YOLO Models (will be auto-downloaded)
+backend/models/*.pt
+*.pt
+
+# HuggingFace model cache (auto-downloaded at runtime)
+backend/models/ppe/
+
+# Runtime data and generated artifacts
+backend/data/
+backend/static/alerts/
+
+# Databases (local runtime state)
+*.db
+*.sqlite
+*.sqlite3
+
+# Misc
+nul
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Temp files
+*.tmp
+*.temp

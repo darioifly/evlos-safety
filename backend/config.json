@@ -1,0 +1,67 @@
+{
+  "model": "models/ppe/helmet_vest.pt",
+  "modelType": "ppe",
+  "confidence": 0.75,
+  "device": "cuda:0",
+  "minPersons": 1,
+  "cooldown": 5,
+  "batchSize": 4,
+  "streamQuality": "highest",
+  "streamWidth": 640,
+  "streamHeight": 480,
+  "frameSampling": 10,
+  "detectionMode": "dual",
+  "schedule": {
+    "dayStartHour": 6,
+    "dayEndHour": 18
+  },
+  "ppeRules": {
+    "requireHelmet": true,
+    "requireVest": true,
+    "alwaysAlertOnPerson": true
+  },
+  "vestColorOverride": {
+    "enabled": true,
+    "threshold": 0.08,
+    "colors": ["red", "orange", "yellow", "green"],
+    "description": "Override false 'novest' detections when hi-vis color is present in ROI (8% for open vests)"
+  },
+  "distanceThresholds": {
+    "veryFarThreshold": 0.05,
+    "farThreshold": 0.15,
+    "closeThreshold": 0.3,
+    "alertOnVeryFar": false,
+    "alertOnFar": true,
+    "alertOnClose": true
+  },
+  "nxWitnessAlerts": {
+    "enabled": true,
+    "sendEvents": true,
+    "createBookmarks": true,
+    "bookmarkDuration": 300
+  },
+  "availableModels": {
+    "person": {
+      "path": "yolov8n.pt",
+      "name": "Person Detection (YOLO8n)",
+      "description": "Detects only persons - for intrusion monitoring",
+      "classes": [
+        "person"
+      ]
+    },
+    "ppe": {
+      "path": "models/ppe/construction_safety.pt",
+      "name": "PPE Detection (Construction Safety)",
+      "description": "Detects helmet, vest violations with NO-Hardhat/NO-Safety Vest classes",
+      "classes": [
+        "Hardhat",
+        "NO-Hardhat",
+        "Safety Vest",
+        "NO-Safety Vest",
+        "Person",
+        "Mask",
+        "NO-Mask"
+      ]
+    }
+  }
+}

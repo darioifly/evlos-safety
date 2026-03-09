@@ -1,0 +1,845 @@
+Device PTZ
+
+POST
+/rest/v3/devices/{deviceId}/ptz/move
+Start PTZ move
+Starts a continuous PTZ move.
+
+Parameters
+Name	Description
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Body
+application/json
+Example Value
+Schema
+{
+
+  "api": "none",
+
+  "pan": 1,
+
+  "tilt": 1,
+
+  "zoom": 1,
+
+  "focus": -1
+
+}
+Responses
+default	
+succesful operation
+
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+DELETE
+/rest/v3/devices/{deviceId}/ptz/move
+Stop PTZ move
+Stops a continuous PTZ move.
+
+Parameters
+Name	Description
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+api
+string(query)	
+API type to use.
+
+Available values : none, operational, configurational, any
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Responses
+default	
+succesful operation
+
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+GET
+/rest/v3/devices/{deviceId}/ptz/position
+Get Device PTZ position
+Retrieves the Device current position. Returns x, y, and z in the range defined by the Device.
+
+Parameters
+Name	Description
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+type
+string(query)	
+Type of the position to be returned.
+
+Possible values are:
+
+"absolute" Absolute position in the range defined by the Device.
+"logical" Logical position in the range -180 to 180.
+Available values : absolute, logical
+
+api
+string(query)	
+API type to use.
+
+Available values : none, operational, configurational, any
+
+_format
+string(query)	
+Response format type. The HTTP Accept header is used as the format if this parameter is unspecified. If the Accept header is unspecifed too, then JSON is used. Keys of the elements that do not start with a letter or an underscore are prefixed with an underscore for XML. Fields of the list type are skipped for CSV.
+
+Available values : JSON, XML, CSV
+
+_stripDefault
+boolean(query)	
+Omit fields which have values equal to their default values. Otherwise, such fields will not be omitted.
+
+Available values : true
+
+_keepDefault
+boolean(query)	
+Deprecated, use _stripDefault instead. If specified works in reverse to _stripDefault.
+
+Available values : true, false
+
+_language
+string(query)	
+Preferred language for texts in the response body. If unspecified, then en_US is used.
+
+_pretty
+boolean(query)	
+Pretty-format the response body if specified. Applied to JSON only.
+
+Available values : true
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+_with
+string(query)	
+Comma-separated list of field names, which defines a filter for the response objects: only those objects will be included in the response which have at least one field from this list, and only such fields will be included (fields not on this list will be omitted). Nested fields must be referenced by joining their names via a period, for example: _with=id,parameters.name.
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+Responses
+default	
+Device position
+
+application/json
+Example Value
+Schema
+{
+
+  "api": "none",
+
+  "pan": 1,
+
+  "tilt": 1,
+
+  "zoom": 1
+
+}
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+POST
+/rest/v3/devices/{deviceId}/ptz/position
+Move to absolute PTZ position
+Moves the Device to an absolute position. When the Device reports its PTZ capabilities to the Server during initialization, the range of position parameters is sent to the Server. PTZ capabilities can not be read via API.
+
+Parameters
+Name	Description
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Request body
+application/json
+Example Value
+Schema
+{
+
+  "type": "absolute",
+
+  "api": "none",
+
+  "pan": 1,
+
+  "tilt": 1,
+
+  "zoom": 1,
+
+  "speed": 0.1
+
+}
+Responses
+default	
+Device position
+
+application/json
+Example Value
+Schema
+{
+
+  "deviceId": "string",
+
+  "type": "absolute",
+
+  "api": "none",
+
+  "pan": 1,
+
+  "tilt": 1,
+
+  "zoom": 1,
+
+  "speed": 0.1
+
+}
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+GET
+/rest/v3/devices/{deviceId}/ptz/limits
+Get Device PTZ limits
+
+GET
+/rest/v3/devices/{deviceId}/ptz/presets
+Get PTZ presets
+Retrieves the PTZ preset list.
+
+Parameters
+Name	Description
+id
+string(query)	
+_filter
+object(query)	
+This is a family of parameters rather than a fixed-name parameter: any number of response object fields can be specified as parameters, with the desired field values as parameter values. It defines a filter for the response objects: only objects having the specified field values will be included in the response. Nested fields must be referenced by joining their names via a period - see the example.
+
+
+{}
+_format
+string(query)	
+Response format type. The HTTP Accept header is used as the format if this parameter is unspecified. If the Accept header is unspecifed too, then JSON is used. Keys of the elements that do not start with a letter or an underscore are prefixed with an underscore for XML. Fields of the list type are skipped for CSV.
+
+Available values : JSON, XML, CSV
+
+_stripDefault
+boolean(query)	
+Omit fields which have values equal to their default values. Otherwise, such fields will not be omitted.
+
+Available values : true
+
+_keepDefault
+boolean(query)	
+Deprecated, use _stripDefault instead. If specified works in reverse to _stripDefault.
+
+Available values : true, false
+
+_language
+string(query)	
+Preferred language for texts in the response body. If unspecified, then en_US is used.
+
+_pretty
+boolean(query)	
+Pretty-format the response body if specified. Applied to JSON only.
+
+Available values : true
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+_with
+string(query)	
+Comma-separated list of field names, which defines a filter for the response objects: only those objects will be included in the response which have at least one field from this list, and only such fields will be included (fields not on this list will be omitted). Nested fields must be referenced by joining their names via a period, for example: _with=id,parameters.name.
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_orderBy
+array[string](query)	
+Available values : id, deviceId, name
+
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+Responses
+default	
+Preset list
+
+application/json
+Example Value
+Schema
+[
+
+  {
+
+    "id": "string",
+
+    "deviceId": "string",
+
+    "name": "string"
+
+  }
+
+]
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+POST
+/rest/v3/devices/{deviceId}/ptz/presets
+Create PTZ preset
+
+PATCH
+/rest/v3/devices/{deviceId}/ptz/presets/{id}
+Update PTZ preset name
+Updates the display name of the specified PTZ preset.
+
+Parameters
+Name	Description
+id *
+string(path)	
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Request body
+application/json
+Example Value
+Schema
+{
+
+  "name": ""
+
+}
+Responses
+default	
+succesful operation
+
+application/json
+Example Value
+Schema
+{
+
+  "id": "string",
+
+  "deviceId": "string",
+
+  "name": "string"
+
+}
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+DELETE
+/rest/v3/devices/{deviceId}/ptz/presets/{id}
+Delete PTZ preset
+Deletes the specified PTZ preset.
+
+Parameters
+Name	Description
+id *
+string(path)	
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Responses
+default	
+succesful operation
+
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+POST
+/rest/v3/devices/{deviceId}/ptz/presets/{id}/activate
+Activate PTZ preset
+Activates the specified PTZ preset.
+
+Parameters
+Name	Description
+id *
+string(path)	
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Request body
+application/json
+Example Value
+Schema
+{
+
+  "speed": 0.1
+
+}
+Responses
+default	
+succesful operation
+
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+GET
+/rest/v3/devices/{deviceId}/ptz/tours
+Get PTZ Tours
+Retrieves the PTZ Tour list.
+
+Parameters
+Name	Description
+deviceId *
+string(path)	
+Device id to get PTZ Tours from.
+
+_filter
+object(query)	
+This is a family of parameters rather than a fixed-name parameter: any number of response object fields can be specified as parameters, with the desired field values as parameter values. It defines a filter for the response objects: only objects having the specified field values will be included in the response. Nested fields must be referenced by joining their names via a period - see the example.
+
+
+{}
+_format
+string(query)	
+Response format type. The HTTP Accept header is used as the format if this parameter is unspecified. If the Accept header is unspecifed too, then JSON is used. Keys of the elements that do not start with a letter or an underscore are prefixed with an underscore for XML. Fields of the list type are skipped for CSV.
+
+Available values : JSON, XML, CSV
+
+_stripDefault
+boolean(query)	
+Omit fields which have values equal to their default values. Otherwise, such fields will not be omitted.
+
+Available values : true
+
+_keepDefault
+boolean(query)	
+Deprecated, use _stripDefault instead. If specified works in reverse to _stripDefault.
+
+Available values : true, false
+
+_language
+string(query)	
+Preferred language for texts in the response body. If unspecified, then en_US is used.
+
+_pretty
+boolean(query)	
+Pretty-format the response body if specified. Applied to JSON only.
+
+Available values : true
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+_with
+string(query)	
+Comma-separated list of field names, which defines a filter for the response objects: only those objects will be included in the response which have at least one field from this list, and only such fields will be included (fields not on this list will be omitted). Nested fields must be referenced by joining their names via a period, for example: _with=id,parameters.name.
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_orderBy
+array[string](query)	
+Available values : id, deviceId, name, spots[].presetId, spots[].stayTimeMs, spots[].speed
+
+Responses
+default	
+Tour list
+
+application/json
+Example Value
+Schema
+[
+
+  {
+
+    "id": "string",
+
+    "deviceId": "string",
+
+    "name": "string",
+
+    "spots": [
+
+      {
+
+        "presetId": "string",
+
+        "stayTimeMs": 1000,
+
+        "speed": 0.1
+
+      }
+
+    ]
+
+  }
+
+]
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+POST
+/rest/v3/devices/{deviceId}/ptz/tours
+Create PTZ Tour
+Creates a new PTZ Tour.
+
+Parameters
+Name	Description
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+_orderBy
+array[string](query)	
+Available values : spots[].presetId, spots[].stayTimeMs, spots[].speed
+
+Request body
+application/json
+Example Value
+Schema
+{
+
+  "id": "",
+
+  "name": "",
+
+  "spots": [
+
+    {
+
+      "presetId": "",
+
+      "stayTimeMs": 1000,
+
+      "speed": 0.1
+
+    }
+
+  ]
+
+}
+Responses
+default	
+succesful operation
+
+application/json
+Example Value
+Schema
+{
+
+  "id": "string",
+
+  "deviceId": "string",
+
+  "name": "string",
+
+  "spots": [
+
+    {
+
+      "presetId": "string",
+
+      "stayTimeMs": 1000,
+
+      "speed": 0.1
+
+    }
+
+  ]
+
+}
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+DELETE
+/rest/v3/devices/{deviceId}/ptz/tours/{id}
+Delete PTZ Tour
+Deletes the specified PTZ Tour.
+
+Parameters
+Name	Description
+id *
+string(path)	
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Responses
+default	
+succesful operation
+
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+GET
+/rest/v3/devices/{deviceId}/ptz/tours/*/active
+Get active PTZ Tour
+Retrieves the active PTZ Tour.
+
+Parameters
+Name	Description
+id
+string(query)	
+_format
+string(query)	
+Response format type. The HTTP Accept header is used as the format if this parameter is unspecified. If the Accept header is unspecifed too, then JSON is used. Keys of the elements that do not start with a letter or an underscore are prefixed with an underscore for XML. Fields of the list type are skipped for CSV.
+
+Available values : JSON, XML, CSV
+
+_stripDefault
+boolean(query)	
+Omit fields which have values equal to their default values. Otherwise, such fields will not be omitted.
+
+Available values : true
+
+_keepDefault
+boolean(query)	
+Deprecated, use _stripDefault instead. If specified works in reverse to _stripDefault.
+
+Available values : true, false
+
+_language
+string(query)	
+Preferred language for texts in the response body. If unspecified, then en_US is used.
+
+_pretty
+boolean(query)	
+Pretty-format the response body if specified. Applied to JSON only.
+
+Available values : true
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+_with
+string(query)	
+Comma-separated list of field names, which defines a filter for the response objects: only those objects will be included in the response which have at least one field from this list, and only such fields will be included (fields not on this list will be omitted). Nested fields must be referenced by joining their names via a period, for example: _with=id,parameters.name.
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_orderBy
+array[string](query)	
+Available values : spots[].presetId, spots[].stayTimeMs, spots[].speed
+
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+Responses
+default	
+Active Tour
+
+application/json
+Example Value
+Schema
+{
+
+  "id": "string",
+
+  "deviceId": "string",
+
+  "name": "string",
+
+  "spots": [
+
+    {
+
+      "presetId": "string",
+
+      "stayTimeMs": 1000,
+
+      "speed": 0.1
+
+    }
+
+  ]
+
+}
+Extensions
+x-permissions	"Depends on Resource access rights."
+
+POST
+/rest/v3/devices/{deviceId}/ptz/tours/{id}/active
+Activate PTZ Tour
+Activates the specified PTZ Tour.
+
+Parameters
+Name	Description
+id *
+string(path)	
+deviceId *
+string(path)	
+Device id (can be obtained from "id", "physicalId" or "logicalId" field via GET /rest/v3/devices) or MAC address (not supported for certain cameras).
+
+_local
+boolean(query)	
+If false or unspecified, the information in the response will be collected from other Servers in the System as well. If specified as empty or true, then only the Server processing the request will provide information.
+
+Available values : true
+
+_strict
+boolean(query)	
+If false or unspecified, the Server will produce available results, ignoring minor errors. If specified as empty or true, then the request will fail on any error.
+
+_ticket
+string(query)	
+One-time authorization ticket previously generated using Login REST API obtained from the current Server.
+
+Request body
+application/json
+Example Value
+Schema
+{}
+Responses
+default	
+succesful operation
+
+Extensions
+x-permissions	"Depends on Resource access rights."

@@ -1,0 +1,107 @@
+{
+  "_comment_general": "==== GENERAL SETTINGS ====",
+  "device": "cuda:0",
+  "confidence": 0.65,
+  "batchSize": 4,
+  "streamWidth": 640,
+  "streamHeight": 480,
+  "frameSampling": 10,
+
+  "_comment_models": "==== MODEL SELECTION ====",
+  "models": {
+    "person": {
+      "path": "yolov8n.pt",
+      "description": "Person detection only (intrusion mode)",
+      "classes": ["person"]
+    },
+    "ppe": {
+      "path": "models/ppe/helmet_vest.pt",
+      "description": "PPE detection (helmet + vest)",
+      "classes": ["hat", "nohat", "vest", "novest", "person"]
+    },
+    "helmet_only": {
+      "path": "models/ppe/ppe_detection.pt",
+      "description": "Helmet detection only",
+      "classes": ["Hardhat", "NO-Hardhat"]
+    }
+  },
+
+  "_comment_detection_mode": "==== DETECTION MODE ====",
+  "detectionMode": "dual",
+  "detectionModes": {
+    "person": "Always use person detection (intrusion only)",
+    "ppe": "Always use PPE detection (helmet + vest)",
+    "dual": "Auto-switch: Day=PPE, Night=Person"
+  },
+
+  "_comment_schedule": "==== DAY/NIGHT SCHEDULE ====",
+  "schedule": {
+    "dayStartHour": 6,
+    "dayEndHour": 18,
+    "dayMode": "ppe",
+    "nightMode": "person"
+  },
+
+  "_comment_ppe_rules": "==== PPE COMPLIANCE RULES ====",
+  "ppeRules": {
+    "requireHelmet": true,
+    "requireVest": true,
+    "requireBoth": true,
+    "allowPartialCompliance": false
+  },
+
+  "_comment_alerts": "==== ALERT SETTINGS ====",
+  "alerts": {
+    "intrusion": {
+      "enabled": true,
+      "minPersons": 1,
+      "cooldown": 5,
+      "severity": "CRITICAL"
+    },
+    "noPPE": {
+      "enabled": true,
+      "cooldown": 10,
+      "severity": "CRITICAL",
+      "description": "Person without helmet AND vest"
+    },
+    "noHelmet": {
+      "enabled": true,
+      "cooldown": 15,
+      "severity": "WARNING",
+      "description": "Person without helmet only"
+    },
+    "noVest": {
+      "enabled": true,
+      "cooldown": 15,
+      "severity": "WARNING",
+      "description": "Person without vest only"
+    },
+    "ppeCompliant": {
+      "enabled": false,
+      "logOnly": true,
+      "description": "Person with full PPE (no alert, just log)"
+    }
+  },
+
+  "_comment_advanced": "==== ADVANCED SETTINGS ====",
+  "advanced": {
+    "enableTracking": false,
+    "trackingMaxAge": 30,
+    "minDetectionArea": 100,
+    "nmsThreshold": 0.45,
+    "maxDetectionsPerFrame": 50
+  },
+
+  "_comment_ui": "==== UI DISPLAY OPTIONS ====",
+  "ui": {
+    "showBoundingBoxes": true,
+    "showConfidence": true,
+    "showLabels": true,
+    "highlightViolations": true
+  },
+
+  "_comment_legacy": "==== LEGACY SETTINGS (backward compatibility) ====",
+  "model": "yolov8n.pt",
+  "minPersons": 1,
+  "cooldown": 5
+}
