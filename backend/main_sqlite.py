@@ -204,6 +204,136 @@ async def health_check():
     return {"status": "ok", "mode": "sqlite"}
 
 
+@app.get("/api/health/details")
+async def health_details():
+    """Diagnostic endpoint: per-worker liveness, EVLOS pool, snapshot age,
+    DB journal mode, screenshot directory sizes, alert backlog. (Phase 2)
+    """
+    backend_dir = Path(__file__).parent
+    status_summary = "ok"
+    reasons = []
+
+    # --- DB ---
+    db_info = {"db_path": str(backend_dir / "database" / "surveillance.db")}
+    try:
+        conn = db.get_connection()
+        try:
+            db_info["journal_mode"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+    except Exception as e:
+        db_info["journal_mode_error"] = str(e)
+    try:
+        db_info["size_bytes"] = Path(db_info["db_path"]).stat().st_size
+    except OSError as e:
+        db_info["size_bytes_error"] = str(e)
+
+    # --- Workers ---
+    workers_info = {"expected": 0, "alive": 0, "dead": [], "names": []}
+    if worker_manager is not None:
+        workers = list(worker_manager.workers.values())
+        workers_info["expected"] = len(workers)
+        for w in workers:
+            cam_id = getattr(w, "camera_id", "?")
+            workers_info["names"].append(cam_id)
+            thread = getattr(w, "thread", None)
+            if thread is not None and thread.is_alive():
+                workers_info["alive"] += 1
+            else:
+                workers_info["dead"].append(cam_id)
+        if workers_info["dead"] and workers_info["expected"] > 0:
+            status_summary = "degraded"
+            reasons.append(f"{len(workers_info['dead'])} dead worker(s)")
+
+    # --- Camera snapshot ---
+    async with camera_snapshot.lock:
+        snap_age = (
+            time.monotonic() - camera_snapshot.last_updated
+            if camera_snapshot.last_updated else None
+        )
+        snap_info = {
+            "age_seconds": round(snap_age, 2) if snap_age is not None else None,
+            "camera_count": len(camera_snapshot.cameras),
+            "last_nx_latency_ms": (
+                round(camera_snapshot.last_nx_latency_ms, 1)
+                if camera_snapshot.last_nx_latency_ms is not None else None
+            ),
+            "last_error": camera_snapshot.last_error,
+        }
+    if snap_age is not None and snap_age > 30 and snap_info["last_error"] is None:
+        status_summary = "degraded"
+        reasons.append(f"snapshot stale ({snap_age:.0f}s)")
+    if snap_info["last_error"]:
+        status_summary = "degraded"
+        reasons.append(f"snapshot error: {snap_info['last_error']}")
+
+    # --- EVLOS ---
+    evlos_info = {"enabled": bool(getattr(evlos_client, "enabled", False))}
+    try:
+        ex = evlos_client.executor
+        evlos_info["pool_max"] = getattr(ex, "_max_workers", None)
+        threads = getattr(ex, "_threads", None)
+        if threads is not None:
+            evlos_info["pool_active"] = sum(1 for t in threads if t.is_alive())
+        wq = getattr(ex, "_work_queue", None)
+        if wq is not None and hasattr(wq, "qsize"):
+            evlos_info["queue_size"] = wq.qsize()
+    except Exception as e:
+        evlos_info["executor_error"] = str(e)
+    try:
+        failed_dir = evlos_client.failed_dir
+        if failed_dir.exists():
+            evlos_info["failed_dir_count"] = sum(
+                1 for p in failed_dir.iterdir() if p.is_file()
+            )
+        else:
+            evlos_info["failed_dir_count"] = 0
+    except Exception as e:
+        evlos_info["failed_dir_error"] = str(e)
+    if evlos_info.get("failed_dir_count", 0) > 100:
+        status_summary = "degraded"
+        reasons.append(f"{evlos_info['failed_dir_count']} failed EVLOS alerts")
+
+    # --- Alerts backlog ---
+    try:
+        alerts_backlog = len(db.get_unnotified_alerts())
+    except Exception as e:
+        alerts_backlog = -1
+        reasons.append(f"alerts_backlog error: {e}")
+        status_summary = "degraded"
+
+    # --- Screenshot directories ---
+    def _dir_stats(p: Path) -> dict:
+        try:
+            if not p.exists():
+                return {"file_count": 0, "size_mb": 0.0}
+            files = [f for f in p.iterdir() if f.is_file()]
+            total = sum(f.stat().st_size for f in files)
+            return {
+                "file_count": len(files),
+                "size_mb": round(total / (1024 * 1024), 2),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    screenshot_dirs = {
+        "data/static/alerts": _dir_stats(backend_dir / "data" / "static" / "alerts"),
+        "data/alert_screenshots": _dir_stats(backend_dir / settings.ALERT_SCREENSHOT_DIR),
+    }
+
+    return {
+        "status": status_summary,
+        "reasons": reasons,
+        "uptime_seconds": round(time.monotonic() - app_started_at, 1),
+        "db": db_info,
+        "workers": workers_info,
+        "camera_snapshot": snap_info,
+        "evlos": evlos_info,
+        "alerts_backlog_unnotified": alerts_backlog,
+        "screenshot_dirs": screenshot_dirs,
+    }
+
+
 @app.get("/api/cameras")
 async def get_cameras():
     """Get all cameras with current status"""
