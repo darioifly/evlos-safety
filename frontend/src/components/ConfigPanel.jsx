@@ -7,7 +7,6 @@ export default function ConfigPanel() {
   const queryClient = useQueryClient()
   const [formData, setFormData] = useState({})
   const [saveStatus, setSaveStatus] = useState(null)
-  const [restartStatus, setRestartStatus] = useState(null)
   const [evlosTestStatus, setEvlosTestStatus] = useState(null)
   const [evlosToggleStatus, setEvlosToggleStatus] = useState(null)
 
@@ -40,24 +39,6 @@ export default function ConfigPanel() {
       setSaveStatus('error')
       setTimeout(() => setSaveStatus(null), 3000)
       console.error('Error updating config:', error)
-    }
-  })
-
-  // Mutation to restart video worker
-  const restartMutation = useMutation({
-    mutationFn: async () => {
-      const res = await api.post('/api/worker/restart')
-      return res.data
-    },
-    onSuccess: (response) => {
-      setRestartStatus('success')
-      setTimeout(() => setRestartStatus(null), 3000)
-      console.log('Worker restarted:', response)
-    },
-    onError: (error) => {
-      setRestartStatus('error')
-      setTimeout(() => setRestartStatus(null), 3000)
-      console.error('Error restarting worker:', error)
     }
   })
 
@@ -652,20 +633,7 @@ export default function ConfigPanel() {
               {mutation.isPending ? 'Saving...' : 'Apply Configuration'}
             </button>
 
-            {/* Restart Worker Button */}
-            <button
-              type="button"
-              onClick={() => restartMutation.mutate()}
-              disabled={restartMutation.isPending}
-              className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-semibold text-white transition-colors mt-3 ${
-                restartMutation.isPending
-                  ? 'bg-gray-400 cursor-not-allowed'
-                  : 'bg-orange-600 hover:bg-orange-700 active:bg-orange-800'
-              }`}
-            >
-              <RefreshCw size={20} className={restartMutation.isPending ? 'animate-spin' : ''} />
-              {restartMutation.isPending ? 'Restarting Worker...' : 'Restart Video Worker'}
-            </button>
+            {/* Worker restart removed in F-003 cleanup */}
 
             {/* Status Messages */}
             {saveStatus === 'success' && (
@@ -682,19 +650,6 @@ export default function ConfigPanel() {
               </div>
             )}
 
-            {restartStatus === 'success' && (
-              <div className="mt-4 flex items-center gap-2 text-green-600 bg-green-50 p-3 rounded-lg">
-                <CheckCircle size={20} />
-                <span className="font-medium">Video worker restarted successfully!</span>
-              </div>
-            )}
-
-            {restartStatus === 'error' && (
-              <div className="mt-4 flex items-center gap-2 text-red-600 bg-red-50 p-3 rounded-lg">
-                <XCircle size={20} />
-                <span className="font-medium">Error restarting worker. Please try manually.</span>
-              </div>
-            )}
           </div>
         </form>
 
