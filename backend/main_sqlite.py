@@ -122,6 +122,10 @@ async def _refresh_camera_snapshot_loop() -> None:
 evlos_drainer_last_run: Optional[str] = None
 evlos_drainer_last_result: Optional[dict] = None
 
+# Worker supervisor state, exposed via /api/health/details.
+supervisor_last_run: Optional[str] = None
+supervisor_last_result: Optional[dict] = None
+
 
 async def _evlos_drainer_loop():
     """Periodic drainer for the EVLOS failed-alerts spool.
@@ -154,6 +158,31 @@ async def _evlos_drainer_loop():
             raise
         except Exception:
             logger.exception("EVLOS drainer pass crashed; continuing")
+
+
+async def _worker_supervisor_loop():
+    """Periodic liveness check on managed CameraWorker threads.
+
+    Detects dead threads, attempts one revival per pass, exposes
+    last_run + last_result via /api/health/details.
+    """
+    global supervisor_last_run, supervisor_last_result
+
+    interval = settings.WORKER_SUPERVISOR_INTERVAL_SECONDS
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            if worker_manager is None:
+                continue
+            result = await asyncio.to_thread(worker_manager.supervise)
+            supervisor_last_run = datetime.utcnow().isoformat()
+            supervisor_last_result = result
+            if result.get("revived") or result.get("still_dead"):
+                logger.warning(f"Worker supervisor: {result}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Worker supervisor pass crashed; continuing")
 
 
 @asynccontextmanager
@@ -190,6 +219,9 @@ async def lifespan(app: FastAPI):
     # F-010: start EVLOS spool drainer (with startup backlog pass)
     evlos_drainer_task = asyncio.create_task(_evlos_drainer_loop())
 
+    # Worker supervisor: detect + revive dead worker threads.
+    supervisor_task = asyncio.create_task(_worker_supervisor_loop())
+
     logger.info("=" * 60)
     logger.info(f"Server started on http://{settings.HOST}:{settings.PORT}")
     logger.info("Video workers managed dynamically via API")
@@ -202,6 +234,7 @@ async def lifespan(app: FastAPI):
     cleanup_task.cancel()
     snapshot_task.cancel()
     evlos_drainer_task.cancel()
+    supervisor_task.cancel()
     if worker_manager:
         worker_manager.stop_all()
 
@@ -283,9 +316,35 @@ async def health_details():
                 workers_info["alive"] += 1
             else:
                 workers_info["dead"].append(cam_id)
-        if workers_info["dead"] and workers_info["expected"] > 0:
-            status_summary = "degraded"
-            reasons.append(f"{len(workers_info['dead'])} dead worker(s)")
+
+    # Supervisor state.
+    workers_info["supervisor_last_run"] = supervisor_last_run
+    workers_info["supervisor_last_result"] = supervisor_last_result
+    sup_interval = settings.WORKER_SUPERVISOR_INTERVAL_SECONDS
+
+    # Degraded if the supervisor itself stopped running.
+    uptime_now = time.monotonic() - app_started_at
+    if supervisor_last_run is None and uptime_now > 3 * sup_interval:
+        status_summary = "degraded"
+        reasons.append("worker supervisor never ran")
+    elif supervisor_last_run is not None:
+        try:
+            sup_age = (datetime.utcnow() - datetime.fromisoformat(supervisor_last_run)).total_seconds()
+            if sup_age > 3 * sup_interval:
+                status_summary = "degraded"
+                reasons.append(f"worker supervisor stale ({sup_age:.0f}s)")
+        except Exception:
+            pass
+
+    # Degraded if dead workers persist across a supervisor pass.
+    if workers_info["dead"] and workers_info["expected"] > 0 and supervisor_last_run is not None:
+        status_summary = "degraded"
+        reasons.append(f"{len(workers_info['dead'])} dead worker(s)")
+    if supervisor_last_result and supervisor_last_result.get("still_dead"):
+        status_summary = "degraded"
+        reasons.append(
+            f"supervisor cannot revive: {supervisor_last_result['still_dead']}"
+        )
 
     # --- Camera snapshot ---
     async with camera_snapshot.lock:

@@ -939,6 +939,17 @@ class VideoWorkerManager:
         # Auto-start workers for cameras that were enabled before shutdown
         self._restore_worker_states()
 
+    # Supervisor: how long to wait after revive before judging the new thread alive.
+    WORKER_REVIVE_PROBE_SECONDS = 1.0
+
+    def _start_worker_for_camera(self, camera_id: str, camera_name: str) -> CameraWorker:
+        """Build and start one CameraWorker. Registers it under self.workers.
+        Does NOT touch db.set_camera_enabled — callers handle persistence."""
+        worker = CameraWorker(camera_id, camera_name, self.model, self.config, self.model_lock)
+        self.workers[camera_id] = worker
+        worker.start()
+        return worker
+
     def start_worker(self, camera_id: str, camera_name: str) -> bool:
         """Start worker for a camera"""
         if not self._initialized:
@@ -948,16 +959,67 @@ class VideoWorkerManager:
         if camera_id in self.workers:
             self.workers[camera_id].stop()
 
-        # Create and start new worker
-        worker = CameraWorker(camera_id, camera_name, self.model, self.config, self.model_lock)
-        self.workers[camera_id] = worker
-        success = worker.start()
+        worker = self._start_worker_for_camera(camera_id, camera_name)
+        success = worker.running
 
         # Save enabled state to database for persistence
         if success:
             db.set_camera_enabled(camera_id, True)
 
         return success
+
+    def supervise(self) -> Dict:
+        """Check liveness of every managed worker thread; revive dead ones.
+
+        Returns a dict {alive: [ids], revived: [ids], still_dead: [ids]}.
+        - 'alive' covers workers whose thread.is_alive() at entry.
+        - 'revived' covers workers whose thread was dead but a fresh thread
+           is running after a brief probe.
+        - 'still_dead' covers workers where revival failed or the new thread
+           is also dead. The original (dead) entry is left in place; the
+           next pass will retry.
+        """
+        result = {"alive": [], "revived": [], "still_dead": []}
+
+        # Snapshot keys to avoid concurrent-modification surprises.
+        for camera_id in list(self.workers.keys()):
+            worker = self.workers.get(camera_id)
+            if worker is None:
+                continue
+
+            thread = getattr(worker, "thread", None)
+            if thread is not None and thread.is_alive():
+                result["alive"].append(camera_id)
+                continue
+
+            # Thread is dead. Revive.
+            camera_name = getattr(worker, "camera_name", camera_id)
+            thread_name = getattr(thread, "name", "?")
+            logger.warning(
+                f"Supervisor: worker for camera {camera_id} died "
+                f"(thread {thread_name}); reviving"
+            )
+            try:
+                try:
+                    worker.stop()
+                except Exception:
+                    pass
+                new_worker = self._start_worker_for_camera(camera_id, camera_name)
+                time.sleep(self.WORKER_REVIVE_PROBE_SECONDS)
+                new_thread = getattr(new_worker, "thread", None)
+                if new_thread is not None and new_thread.is_alive():
+                    result["revived"].append(camera_id)
+                else:
+                    result["still_dead"].append(camera_id)
+                    logger.error(
+                        f"Supervisor: revival of {camera_id} failed "
+                        f"(new thread is also dead)"
+                    )
+            except Exception as e:
+                logger.error(f"Supervisor: revival of {camera_id} raised: {e}")
+                result["still_dead"].append(camera_id)
+
+        return result
 
     def stop_worker(self, camera_id: str) -> bool:
         """Stop worker for a camera"""
@@ -1032,9 +1094,8 @@ class VideoWorkerManager:
 
                 try:
                     # Create worker without calling start_worker to avoid double-setting enabled flag
-                    worker = CameraWorker(camera_id, camera_name, self.model, self.config, self.model_lock)
-                    self.workers[camera_id] = worker
-                    success = worker.start()
+                    worker = self._start_worker_for_camera(camera_id, camera_name)
+                    success = worker.running
 
                     if success:
                         logger.info(f"✓ Restored worker for camera: {camera_name}")

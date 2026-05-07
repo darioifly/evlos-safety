@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     EVLOS_DRAINER_INTERVAL_SECONDS: int = 300
     EVLOS_DRAINER_BATCH_SIZE: int = 10
 
+    # Worker supervisor: how often to check CameraWorker.thread liveness and
+    # auto-revive dead threads.
+    WORKER_SUPERVISOR_INTERVAL_SECONDS: int = 30
+
     class Config:
         env_file = "../.env"  # .env is in parent directory
         case_sensitive = True
