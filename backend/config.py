@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"  # INFO for cleaner logs (use DEBUG for troubleshooting)
     LOG_DIR: str = "logs"
 
+    # F-001: How often the background task refreshes the shared camera-status
+    # snapshot from NxWitness + SQLite. WebSocket clients read from this
+    # snapshot so per-tab load stays flat regardless of N clients.
+    CAMERA_REFRESH_INTERVAL_SECONDS: int = 5
+
     class Config:
         env_file = "../.env"  # .env is in parent directory
         case_sensitive = True

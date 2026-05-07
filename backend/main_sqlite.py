@@ -4,6 +4,7 @@ Reads data from SQLite database written by separate video_worker.py process
 This process ONLY handles HTTP/WebSocket requests - NO video processing!
 """
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Optional
 
 from config import settings
 from utils.logger import logger
@@ -27,6 +29,93 @@ WEBSOCKET_CHECK_INTERVAL = 0.1  # Very fast for real-time alerts!
 # Global NxWitness client and video worker manager
 nx_client = None
 worker_manager = None
+
+# Process start time (monotonic). Used by /api/health/details and snapshot age.
+app_started_at: float = time.monotonic()
+
+
+# F-001: shared camera-status snapshot, refreshed by ONE background task,
+# read by all connected WebSocket clients. Replaces per-client NxWitness polling.
+class CameraStatusSnapshot:
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.cameras: dict = {}
+        self.last_updated: float = 0.0  # time.monotonic()
+        self.last_nx_latency_ms: Optional[float] = None
+        self.last_error: Optional[str] = None
+
+
+camera_snapshot = CameraStatusSnapshot()
+
+
+async def _refresh_camera_snapshot_once() -> None:
+    """Perform ONE refresh of the shared camera snapshot.
+
+    Called from a background loop and from tests.
+    """
+    t0 = time.monotonic()
+    try:
+        nx_cameras = await asyncio.to_thread(nx_client.get_cameras)
+        nx_latency_ms = (time.monotonic() - t0) * 1000.0
+
+        db_cameras = db.get_all_camera_status()
+        db_cameras_map = {cam['camera_id']: cam for cam in db_cameras}
+
+        merged: dict = {}
+        for nx_cam in nx_cameras:
+            cam_id = nx_cam['id']
+            is_online = nx_cam.get('isOnline', False)
+            db_cam = db_cameras_map.get(cam_id, {})
+
+            last_update = db_cam.get('last_update')
+            worker_analyzing = False
+            if is_online and db_cam.get('enabled', False) and last_update:
+                try:
+                    last_update_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
+                    worker_analyzing = (datetime.now() - last_update_dt) < timedelta(seconds=10)
+                except Exception:
+                    worker_analyzing = False
+
+            merged[cam_id] = {
+                'camera_id': cam_id,
+                'camera_name': nx_cam.get('name', cam_id),
+                'online': 1 if is_online else 0,
+                'stream_connected': 1 if worker_analyzing else 0,
+                'worker_analyzing': worker_analyzing,
+                'enabled': db_cam.get('enabled', 0),
+                'person_count': db_cam.get('person_count', 0),
+                'fps': db_cam.get('fps', 0),
+                'avg_confidence': db_cam.get('avg_confidence', 0),
+                'last_update': db_cam.get('last_update'),
+                'last_detection': db_cam.get('last_detection'),
+            }
+
+        async with camera_snapshot.lock:
+            camera_snapshot.cameras = merged
+            camera_snapshot.last_updated = time.monotonic()
+            camera_snapshot.last_nx_latency_ms = nx_latency_ms
+            camera_snapshot.last_error = None
+    except Exception as e:
+        async with camera_snapshot.lock:
+            camera_snapshot.last_error = f"{type(e).__name__}: {e}"
+        logger.error(f"camera snapshot refresh failed: {e}")
+
+
+async def _refresh_camera_snapshot_loop() -> None:
+    """Background task: refresh the camera snapshot at the configured interval."""
+    interval = settings.CAMERA_REFRESH_INTERVAL_SECONDS
+    while True:
+        try:
+            await _refresh_camera_snapshot_once()
+            logger.info(
+                f"[snapshot] refreshed: {len(camera_snapshot.cameras)} cameras "
+                f"in {camera_snapshot.last_nx_latency_ms or 0:.0f}ms"
+            )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"snapshot refresh loop error: {e}")
+        await asyncio.sleep(interval)
 
 
 @asynccontextmanager
@@ -57,6 +146,9 @@ async def lifespan(app: FastAPI):
     # Start background task for periodic cleanup
     cleanup_task = asyncio.create_task(periodic_cleanup())
 
+    # F-001: start background camera-status snapshot refresher
+    snapshot_task = asyncio.create_task(_refresh_camera_snapshot_loop())
+
     logger.info("=" * 60)
     logger.info(f"Server started on http://{settings.HOST}:{settings.PORT}")
     logger.info("Video workers managed dynamically via API")
@@ -67,6 +159,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
     cleanup_task.cancel()
+    snapshot_task.cancel()
     if worker_manager:
         worker_manager.stop_all()
 
