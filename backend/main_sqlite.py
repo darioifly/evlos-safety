@@ -107,7 +107,7 @@ async def _refresh_camera_snapshot_loop() -> None:
     while True:
         try:
             await _refresh_camera_snapshot_once()
-            logger.info(
+            logger.debug(
                 f"[snapshot] refreshed: {len(camera_snapshot.cameras)} cameras "
                 f"in {camera_snapshot.last_nx_latency_ms or 0:.0f}ms"
             )
@@ -742,24 +742,27 @@ async def get_memory_status():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
-    WebSocket endpoint for real-time alerts
-    Checks database every 0.1 seconds for new detections/alerts
+    WebSocket endpoint for real-time alerts (F-001 refactored).
+
+    Alerts: polled from SQLite at WEBSOCKET_CHECK_INTERVAL (cheap indexed SELECT).
+    Camera status / metrics: read from the shared CameraStatusSnapshot (filled
+    by ONE background task), pushed at settings.CAMERA_REFRESH_INTERVAL_SECONDS.
+    No per-client NxWitness calls.
     """
     await websocket.accept()
     logger.info(f"🔴 WebSocket connected - Real-time surveillance active")
 
+    last_camera_push = 0.0
+    last_metrics_push = 0.0
+    metrics_interval = 10.0
+
     try:
-        last_detection_id = 0
-        last_alert_id = 0
-
         while True:
-            # Check for new unnotified alerts (VERY FAST - every 100ms)
+            # Fast: alert push from DB (shared read connection, F-012).
             alerts = db.get_unnotified_alerts()
-
             if alerts:
                 alert_ids = []
                 for alert in alerts:
-                    # Send alert to client
                     await websocket.send_json({
                         "type": "alert",
                         "data": {
@@ -775,103 +778,47 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     alert_ids.append(alert['id'])
                     logger.info(f"📤 Alert sent: {alert['person_count']} person(s) in {alert['camera_name']}")
-
-                # Mark as notified
                 db.mark_alerts_notified(alert_ids)
 
-            # Also send camera status updates (using same logic as /api/cameras/status)
-            try:
-                # Get real-time camera list from NxWitness (SOURCE OF TRUTH)
-                nx_cameras = await asyncio.to_thread(nx_client.get_cameras)
+            now = time.monotonic()
 
-                # Get detection stats from database
-                db_cameras = db.get_all_camera_status()
-                db_cameras_map = {cam['camera_id']: cam for cam in db_cameras}
-
-                # Build status dict using NxWitness as source of truth
-                cameras_dict = {}
-                for nx_cam in nx_cameras:
-                    cam_id = nx_cam['id']
-                    is_online = nx_cam['isOnline']
-
-                    # Get database stats if available
-                    db_cam = db_cameras_map.get(cam_id, {})
-
-                    # Determine if worker is analyzing
-                    last_update = db_cam.get('last_update')
-                    worker_analyzing = False
-                    if is_online and db_cam.get('enabled', False):
-                        if last_update:
-                            try:
-                                last_update_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
-                                time_since_update = datetime.now() - last_update_dt
-                                worker_analyzing = time_since_update < timedelta(seconds=10)
-                            except:
-                                worker_analyzing = False
-
-                    # Build status object
-                    cameras_dict[cam_id] = {
-                        'camera_id': cam_id,
-                        'camera_name': nx_cam['name'],
-                        'online': 1 if is_online else 0,
-                        'stream_connected': 1 if worker_analyzing else 0,
-                        'worker_analyzing': worker_analyzing,
-                        'enabled': db_cam.get('enabled', 0),
-                        'person_count': db_cam.get('person_count', 0),
-                        'fps': db_cam.get('fps', 0),
-                        'avg_confidence': db_cam.get('avg_confidence', 0),
-                        'last_update': db_cam.get('last_update'),
-                        'last_detection': db_cam.get('last_detection'),
-                    }
-
+            # Slow: camera status from shared snapshot.
+            if now - last_camera_push >= settings.CAMERA_REFRESH_INTERVAL_SECONDS:
+                async with camera_snapshot.lock:
+                    cameras_dict = dict(camera_snapshot.cameras)
                 await websocket.send_json({
                     "type": "camera_status_update",
-                    "data": cameras_dict
+                    "data": cameras_dict,
                 })
-            except Exception as e:
-                logger.error(f"Error getting camera status for WebSocket: {e}")
-                # Fallback to database-only data
-                cameras = db.get_all_camera_status()
-                cameras_dict = {cam['camera_id']: {**cam, 'online': 0, 'worker_analyzing': False} for cam in cameras}
-                await websocket.send_json({
-                    "type": "camera_status_update",
-                    "data": cameras_dict
-                })
+                last_camera_push = now
 
-            # Send metrics update every 10 seconds (every 100 iterations at 0.1s interval)
-            if not hasattr(websocket_endpoint, '_ws_counter'):
-                websocket_endpoint._ws_counter = 0
-            websocket_endpoint._ws_counter += 1
+                # Slow: metrics every metrics_interval seconds, derived from the snapshot.
+                if now - last_metrics_push >= metrics_interval:
+                    cameras_list = list(cameras_dict.values())
+                    camera_fps = {c['camera_name']: c['fps'] for c in cameras_list if c.get('fps', 0)}
+                    avg_fps = sum(camera_fps.values()) / len(camera_fps) if camera_fps else 0
+                    active_cameras = sum(1 for c in cameras_list if c.get('stream_connected'))
 
-            if websocket_endpoint._ws_counter % 100 == 0:
-                # Calculate real-time metrics using cameras_dict
-                cameras_list = list(cameras_dict.values())
-                camera_fps = {cam['camera_name']: cam['fps'] for cam in cameras_list if cam['fps'] > 0}
-                avg_fps = sum(camera_fps.values()) / len(camera_fps) if camera_fps else 0
-                active_cameras = sum(1 for cam in cameras_list if cam['stream_connected'])
+                    temp_conn = db.get_connection()
+                    try:
+                        alerts_today = temp_conn.execute("""
+                            SELECT COUNT(*) as today FROM alerts
+                            WHERE DATE(timestamp) = DATE('now')
+                        """).fetchone()['today']
+                    finally:
+                        temp_conn.close()
 
-                # Get alerts today
-                temp_conn = db.get_connection()
-                try:
-                    today_cursor = temp_conn.execute("""
-                        SELECT COUNT(*) as today FROM alerts
-                        WHERE DATE(timestamp) = DATE('now')
-                    """)
-                    alerts_today = today_cursor.fetchone()['today']
-                finally:
-                    temp_conn.close()
+                    await websocket.send_json({
+                        "type": "metrics_update",
+                        "data": {
+                            "avgFps": avg_fps,
+                            "cameraFps": camera_fps,
+                            "alertsToday": alerts_today,
+                            "activeCameras": active_cameras,
+                        }
+                    })
+                    last_metrics_push = now
 
-                await websocket.send_json({
-                    "type": "metrics_update",
-                    "data": {
-                        "avgFps": avg_fps,
-                        "cameraFps": camera_fps,
-                        "alertsToday": alerts_today,
-                        "activeCameras": active_cameras
-                    }
-                })
-
-            # Wait before next check (100ms for real-time surveillance!)
             await asyncio.sleep(WEBSOCKET_CHECK_INTERVAL)
 
     except WebSocketDisconnect:
