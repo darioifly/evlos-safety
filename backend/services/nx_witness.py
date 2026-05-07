@@ -31,6 +31,11 @@ class NxWitnessClient:
         self._token_timestamp: float = 0
         self._token_ttl: int = 900  # 15 minutes
 
+        # F-026: cache the index of the working endpoint in get_cameras() so we
+        # don't pay the failed-attempt latency for the first 3 endpoints on every
+        # call. Self-heals: a cached endpoint that starts failing is re-scanned.
+        self._cached_endpoint_index: Optional[int] = None
+
         logger.info(f"Initialized NxWitness client - API: {self.server_url}, Stream: {self.stream_server_url}")
 
     def _get_auth_token(self) -> str:
@@ -71,7 +76,21 @@ class NxWitnessClient:
             "/ec2/getCamerasEx"
         ]
 
-        for endpoint in endpoints:
+        # F-026: try the cached endpoint first; on failure, fall through to scan.
+        if self._cached_endpoint_index is not None:
+            idx = self._cached_endpoint_index
+            try:
+                url = f"{self.server_url}{endpoints[idx]}"
+                response = requests.get(url, auth=self.auth, timeout=10, verify=False)
+                if response.status_code == 200:
+                    return self._parse_cameras(response.json())
+                logger.warning(f"Cached endpoint {endpoints[idx]} returned {response.status_code}; rescanning")
+            except Exception as e:
+                logger.warning(f"Cached endpoint {endpoints[idx]} failed ({e}); rescanning")
+            # Cache stale: clear and fall through.
+            self._cached_endpoint_index = None
+
+        for i, endpoint in enumerate(endpoints):
             try:
                 url = f"{self.server_url}{endpoint}"
                 logger.debug(f"Trying endpoint: {url}")
@@ -87,6 +106,7 @@ class NxWitnessClient:
                     cameras_data = response.json()
                     cameras = self._parse_cameras(cameras_data)
                     logger.debug(f"Successfully fetched {len(cameras)} cameras from {endpoint}")
+                    self._cached_endpoint_index = i
                     return cameras
                 else:
                     logger.warning(f"Endpoint {endpoint} returned status {response.status_code}")
