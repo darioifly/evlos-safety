@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 from config import settings
 from utils.logger import logger
+from utils.screenshot import cleanup_screenshot_dir
 from database import db
 from services.nx_witness import NxWitnessClient
 from services.video_worker_manager import VideoWorkerManager
@@ -791,7 +792,7 @@ async def websocket_endpoint(websocket: WebSocket):
 # ============================================================================
 
 async def periodic_cleanup():
-    """Periodic database cleanup"""
+    """Periodic database + screenshot file cleanup (F-009)"""
     while True:
         try:
             # Cleanup old data every hour
@@ -799,6 +800,21 @@ async def periodic_cleanup():
             logger.info("Running database cleanup...")
             db.cleanup_old_detections(days=7)
             db.cleanup_old_alerts(days=7)
+
+            # F-009: also clean the actual JPEG files (DB rows alone don't
+            # release disk). Run the filesystem walk in a thread.
+            backend_dir = Path(__file__).parent
+            deleted_a = await asyncio.to_thread(
+                cleanup_screenshot_dir, backend_dir / "data" / "static" / "alerts", 7
+            )
+            deleted_b = await asyncio.to_thread(
+                cleanup_screenshot_dir, backend_dir / settings.ALERT_SCREENSHOT_DIR, 7
+            )
+            if deleted_a or deleted_b:
+                logger.info(
+                    f"periodic_cleanup: deleted {deleted_a + deleted_b} old screenshot files"
+                )
+
             logger.info("✓ Database cleanup complete")
         except asyncio.CancelledError:
             break

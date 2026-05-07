@@ -151,6 +151,42 @@ def draw_bounding_boxes(frame: np.ndarray, boxes: List[Dict]) -> np.ndarray:
     return frame
 
 
+def cleanup_screenshot_dir(path, days: int) -> int:
+    """Delete files in `path` older than `days` days. (F-009)
+
+    Args:
+        path: pathlib.Path or str pointing at a directory.
+        days: retention window in days.
+
+    Returns:
+        Number of files deleted. Tolerates a missing directory (returns 0)
+        and per-file OSError (logged at debug, continues).
+    """
+    try:
+        path_str = str(path)
+        if not os.path.isdir(path_str):
+            return 0
+
+        cutoff_time = time.time() - (days * 24 * 60 * 60)
+        deleted = 0
+
+        for entry in os.listdir(path_str):
+            full = os.path.join(path_str, entry)
+            try:
+                if not os.path.isfile(full):
+                    continue
+                if os.path.getmtime(full) < cutoff_time:
+                    os.remove(full)
+                    deleted += 1
+            except OSError as e:
+                logger.debug(f"cleanup_screenshot_dir: skip {full}: {e}")
+
+        return deleted
+    except Exception as e:
+        logger.error(f"cleanup_screenshot_dir error on {path}: {e}")
+        return 0
+
+
 def cleanup_old_screenshots(retention_days: int = None) -> int:
     """
     Remove screenshots older than retention period
