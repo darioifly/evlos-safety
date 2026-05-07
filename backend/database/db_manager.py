@@ -4,6 +4,7 @@ Handles SQLite database operations for shared data between processes
 """
 import sqlite3
 import json
+import threading
 from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
@@ -24,11 +25,27 @@ class DatabaseManager:
     def __init__(self, db_path: str = None):
         self.db_path = db_path or str(DB_PATH)
         self._init_database()
+        # Persistent read connection for hot-path WS reads (F-012).
+        # Serialized via _read_lock because sqlite3 connections are not
+        # thread-safe even with check_same_thread=False.
+        self._read_conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._read_conn.row_factory = sqlite3.Row
+        self._read_conn.execute("PRAGMA busy_timeout=5000")
+        self._read_conn.execute("PRAGMA foreign_keys=ON")
+        self._read_lock = threading.Lock()
 
     def _init_database(self):
         """Initialize database with schema"""
         try:
             conn = self.get_connection()
+
+            # WAL allows concurrent readers/writers without "database is locked".
+            # synchronous=NORMAL is safe with WAL and faster than FULL.
+            # busy_timeout gives writes 5s to wait for a reader instead of failing immediately.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")
 
             # Read and execute schema
             if SCHEMA_PATH.exists():
@@ -49,7 +66,27 @@ class DatabaseManager:
         """Get database connection with row factory"""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row  # Access columns by name
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
+
+    def _read(self, sql: str, params: tuple = ()) -> List[sqlite3.Row]:
+        """Execute a read query against the shared persistent connection (F-012).
+
+        Used by hot-path reads called from the WebSocket loop to avoid
+        opening/closing a connection per call.
+        """
+        with self._read_lock:
+            cursor = self._read_conn.execute(sql, params)
+            return cursor.fetchall()
+
+    def close(self):
+        """Close the persistent read connection. Called from FastAPI lifespan shutdown."""
+        try:
+            with self._read_lock:
+                self._read_conn.close()
+        except Exception as e:
+            logger.debug(f"Error closing read connection: {e}")
 
     # Camera Status Operations
 
@@ -93,19 +130,14 @@ class DatabaseManager:
             conn.close()
 
     def get_all_camera_status(self) -> List[Dict]:
-        """Get status of all cameras"""
-        conn = self.get_connection()
-        try:
-            cursor = conn.execute("""
-                SELECT camera_id, camera_name, online, stream_connected,
-                       person_count, fps, enabled, last_update, last_detection
-                FROM camera_status
-                ORDER BY camera_name
-            """)
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        """Get status of all cameras (F-012: hot-path read on shared connection)"""
+        rows = self._read("""
+            SELECT camera_id, camera_name, online, stream_connected,
+                   person_count, fps, enabled, last_update, last_detection
+            FROM camera_status
+            ORDER BY camera_name
+        """)
+        return [dict(row) for row in rows]
 
     def get_camera_status(self, camera_id: str) -> Optional[Dict]:
         """Get status of specific camera"""
@@ -196,20 +228,15 @@ class DatabaseManager:
             conn.close()
 
     def get_unnotified_alerts(self) -> List[Dict]:
-        """Get all unnotified alerts"""
-        conn = self.get_connection()
-        try:
-            cursor = conn.execute("""
-                SELECT id, camera_id, camera_name, person_count,
-                       avg_confidence, full_image_path, cropped_image_path, timestamp
-                FROM alerts
-                WHERE notified = 0
-                ORDER BY timestamp DESC
-            """)
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-        finally:
-            conn.close()
+        """Get all unnotified alerts (F-012: hot-path read on shared connection)"""
+        rows = self._read("""
+            SELECT id, camera_id, camera_name, person_count,
+                   avg_confidence, full_image_path, cropped_image_path, timestamp
+            FROM alerts
+            WHERE notified = 0
+            ORDER BY timestamp DESC
+        """)
+        return [dict(row) for row in rows]
 
     def mark_alerts_notified(self, alert_ids: List[int]):
         """Mark alerts as notified"""
@@ -486,23 +513,18 @@ class DatabaseManager:
             conn.close()
 
     def get_camera_detection_config(self, camera_id: str) -> Optional[Dict]:
-        """Get camera detection configuration with preset details"""
-        conn = self.get_connection()
-        try:
-            cursor = conn.execute("""
-                SELECT
-                    c.detection_mode,
-                    c.detection_preset_id,
-                    p.name as preset_name,
-                    p.*
-                FROM camera_status c
-                LEFT JOIN detection_presets p ON c.detection_preset_id = p.id
-                WHERE c.camera_id = ?
-            """, (camera_id,))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
+        """Get camera detection configuration with preset details (F-012: hot-path read on shared connection)"""
+        rows = self._read("""
+            SELECT
+                c.detection_mode,
+                c.detection_preset_id,
+                p.name as preset_name,
+                p.*
+            FROM camera_status c
+            LEFT JOIN detection_presets p ON c.detection_preset_id = p.id
+            WHERE c.camera_id = ?
+        """, (camera_id,))
+        return dict(rows[0]) if rows else None
 
 
 # Global database instance

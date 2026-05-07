@@ -73,6 +73,9 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down EVLOS client...")
     evlos_client.shutdown()
 
+    # Close persistent DB read connection (F-012)
+    db.close()
+
     logger.info("FastAPI server stopped")
 
 
