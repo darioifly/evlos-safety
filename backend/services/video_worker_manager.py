@@ -19,6 +19,41 @@ from services.nx_witness import nx_client
 from integrations.evlos_client import evlos_client
 
 
+# F-002: MJPEG parsing hardening.
+# Cap the receive buffer to avoid unbounded growth on malformed streams.
+MJPEG_BUFFER_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+
+# (connect_timeout, read_timeout): if no bytes arrive for read_timeout seconds
+# the request raises ReadTimeout instead of blocking forever.
+MJPEG_TIMEOUT = (10, 30)
+
+
+def _extract_jpeg(buffer: bytes):
+    """Try to extract one complete JPEG from `buffer`.
+
+    Returns (jpeg_bytes_or_None, remaining_buffer).
+
+    Defensive against:
+    - EOI of a previous frame appearing before the next SOI in the buffer.
+    - Buffer overflow (drop everything before the last SOI; full reset if no SOI).
+    """
+    a = buffer.find(b"\xff\xd8")  # SOI
+    b = buffer.find(b"\xff\xd9")  # EOI
+
+    if a != -1 and b != -1 and b > a:
+        return buffer[a:b + 2], buffer[b + 2:]
+
+    if a != -1 and b != -1 and b <= a:
+        # EOI of a previous frame still in the buffer; drop up to it.
+        return None, buffer[b + 2:]
+
+    if len(buffer) > MJPEG_BUFFER_MAX_BYTES:
+        last_soi = buffer.rfind(b"\xff\xd8")
+        return None, (buffer[last_soi:] if last_soi != -1 else b"")
+
+    return None, buffer
+
+
 class CameraWorker:
     """Worker thread for a single camera"""
 
@@ -109,12 +144,12 @@ class CameraWorker:
         logger.info(f"[{self.camera_name}] Connecting to stream...")
 
         try:
-            # Connect to stream
+            # Connect to stream (F-002: separate connect / read timeouts)
             response = requests.get(
                 stream_url,
                 auth=nx_client.auth,
                 stream=True,
-                timeout=10,
+                timeout=MJPEG_TIMEOUT,
                 verify=False
             )
 
@@ -132,7 +167,6 @@ class CameraWorker:
             fps_start = time.time()
             fps_frames = 0
             frame_sampling = self.config.get("frameSampling", 10)
-            max_buffer_size = 5 * 1024 * 1024  # 5MB max buffer to prevent memory issues
 
             for chunk in response.iter_content(chunk_size=4096):
                 if self.stop_event.is_set():
@@ -141,21 +175,10 @@ class CameraWorker:
 
                 bytes_data += chunk
 
-                # Prevent memory accumulation by limiting buffer size
-                if len(bytes_data) > max_buffer_size:
-                    # Find last complete JPEG and discard everything before it
-                    last_start = bytes_data.rfind(b'\xff\xd8')
-                    if last_start > 0:
-                        bytes_data = bytes_data[last_start:]
+                # F-002: defensive JPEG extraction (handles EOI-before-SOI and overflow).
+                jpg, bytes_data = _extract_jpeg(bytes_data)
 
-                # Parse MJPEG
-                a = bytes_data.find(b'\xff\xd8')
-                b = bytes_data.find(b'\xff\xd9')
-
-                if a != -1 and b != -1:
-                    jpg = bytes_data[a:b+2]
-                    bytes_data = bytes_data[b+2:]
-
+                if jpg is not None:
                     try:
                         # Decode frame
                         frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -180,6 +203,10 @@ class CameraWorker:
                         logger.warning(f"[{self.camera_name}] Frame decode error, skipping: {e}")
                         continue
 
+        except requests.exceptions.ReadTimeout as e:
+            # F-002: idle stream — treat like a normal disconnect, outer loop reconnects.
+            logger.warning(f"[{self.camera_name}] Stream read timeout (no data for {MJPEG_TIMEOUT[1]}s): {e}")
+            db.upsert_camera_status(self.camera_id, self.camera_name, stream_connected=False)
         except Exception as e:
             logger.error(f"[{self.camera_name}] Stream error: {e}")
             db.upsert_camera_status(self.camera_id, self.camera_name, stream_connected=False)
