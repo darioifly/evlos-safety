@@ -1,0 +1,1 @@
+Legacy one-shot migration scripts. They predate `schema.sql` which now creates all columns via `CREATE TABLE IF NOT EXISTS`. Kept here for archival only. Do not run unless you are upgrading a database that pre-dates the schema rewrite.
