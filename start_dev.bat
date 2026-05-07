@@ -26,7 +26,7 @@ timeout /t 2 /nobreak >nul
 echo.
 echo Starting Backend Server...
 cd backend
-start cmd /k "venv\Scripts\activate && set DEV_MODE=true && python main.py"
+start cmd /k "venv\Scripts\activate && set DEV_MODE=true && python main_sqlite.py"
 
 timeout /t 3 /nobreak >nul
 
