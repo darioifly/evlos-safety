@@ -10,7 +10,10 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# Python venv lib directories (do NOT match frontend/src/lib/)
+**/venv/lib/
+**/.venv/lib/
+**/site-packages/
 lib64/
 parts/
 sdist/
@@ -68,6 +71,8 @@ Thumbs.db
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+!frontend/src/lib/
+!frontend/src/lib/**
 
 # Temp files
 *.tmp
