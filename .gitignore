@@ -58,6 +58,11 @@ backend/static/alerts/
 *.db
 *.sqlite
 *.sqlite3
+# SQLite WAL mode side files (created when journal_mode=WAL)
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
 
 # Misc
 nul
