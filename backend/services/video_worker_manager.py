@@ -16,7 +16,6 @@ from config import settings
 from utils.logger import logger
 from database import db
 from services.nx_witness import nx_client
-from services.alert_manager import alert_manager
 from integrations.evlos_client import evlos_client
 
 
