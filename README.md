@@ -89,25 +89,31 @@ ALERT_COOLDOWN_SECONDS=5
 
 ## Running the Application
 
+The backend listens on port **7002** (configurable via `PORT` in `.env`). The
+frontend dev server runs on **5173** and proxies `/api` and `/ws` to the
+backend.
+
 ### Development Mode
 
-**Terminal 1 - Backend:**
+**Terminal 1 — Backend:**
 ```bash
 cd backend
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
-python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+venv\Scripts\activate
+python main_sqlite.py
 ```
+Or run `start_fastapi.bat` from the repo root.
 
-**Terminal 2 - Frontend:**
+**Terminal 2 — Frontend:**
 ```bash
 cd frontend
 npm run dev
 ```
 
+Or run `start_dev.bat` from the repo root to launch both at once.
+
 Access the application:
 - Frontend: http://localhost:5173 (development server)
-- Backend API: http://localhost:8000/docs (Swagger UI)
+- Backend API: http://localhost:7002/docs (Swagger UI)
 
 ### Production Mode
 
@@ -117,14 +123,14 @@ cd frontend
 npm run build
 ```
 
-**Run Backend (serves frontend):**
+**Run Backend (serves the built frontend):**
 ```bash
 cd backend
-venv\Scripts\activate  # Windows
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+venv\Scripts\activate
+python main_sqlite.py
 ```
 
-Access the application: http://localhost:8000
+Access the application: http://localhost:7002
 
 ## Usage
 
@@ -162,23 +168,33 @@ System performance metrics:
 
 ## Architecture
 
-### Backend (FastAPI)
+Single Python process. FastAPI serves HTTP and WebSocket; YOLO inference
+runs on threads inside the same process (one `CameraWorker` thread per enabled
+camera). SQLite is the single source of truth for camera state, detections,
+and alerts. EVLOS uploads happen through a 4-worker thread pool.
+
+### Backend (FastAPI, in-process YOLO)
 ```
 backend/
-├── main.py                 # FastAPI app + WebSocket + startup
-├── config.py               # Configuration management
+├── main_sqlite.py             # FastAPI app + WebSocket + lifespan + inline endpoints
+├── config.py                  # pydantic-settings (.env loader)
+├── config.json                # Hot-reloaded JSON config (model, PPE rules, schedule)
 ├── routers/
-│   ├── cameras.py         # Camera API endpoints
-│   ├── detection.py       # Detection config endpoints
-│   └── alerts.py          # Alert endpoints
+│   ├── evlos.py              # /api/evlos/* (config, test, failed-alerts)
+│   └── presets.py            # /api/presets/* (CRUD detection presets)
 ├── services/
-│   ├── nx_witness.py      # NxWitness API client
-│   ├── stream_manager.py  # Multi-threaded stream processing
-│   ├── detector.py        # YOLOv8 detection
-│   └── alert_manager.py   # Alert logic with cooldown
+│   ├── video_worker_manager.py  # CameraWorker threads + YOLO model lifecycle
+│   └── nx_witness.py         # NxWitness REST + MJPEG client
+├── integrations/
+│   └── evlos_client.py       # EVLOS HTTP client + ThreadPoolExecutor + spool
+├── database/
+│   ├── db_manager.py         # SQLite access layer
+│   ├── schema.sql            # Self-applying CREATE TABLE IF NOT EXISTS
+│   └── migrations_legacy/    # Archived one-shot migration scripts
 └── utils/
-    ├── logger.py          # Logging configuration
-    └── metrics.py         # Performance metrics
+    ├── logger.py             # Rotating file + console logger
+    ├── metrics.py            # In-memory FPS / detection counters
+    └── screenshot.py         # Box-drawing helpers, retention cleanup
 ```
 
 ### Frontend (React + Vite)
@@ -202,26 +218,37 @@ frontend/
 ## API Endpoints
 
 ### Cameras
-- `GET /api/cameras` - Get all cameras
-- `GET /api/cameras/status` - Get real-time camera status
-- `GET /api/cameras/{id}` - Get specific camera details
-- `POST /api/cameras/{id}/restart` - Restart camera stream
+- `GET  /api/cameras` — list cameras with current DB-side status
+- `GET  /api/cameras/status` — combined NxWitness + DB status
+- `GET  /api/cameras/{id}` — camera details
+- `POST /api/cameras/{id}/toggle` — start or stop the per-camera worker
 
-### Detection
-- `GET /api/detection/config` - Get current configuration
-- `POST /api/detection/config` - Update configuration
-- `GET /api/detection/status` - Get detection system status
+### Detections / Alerts
+- `GET    /api/detections/recent` — recent detections (with `person_count > 0`)
+- `GET    /api/alerts/recent` — recent alerts
+- `GET    /api/alerts/stats` — totals + alerts-per-camera
+- `DELETE /api/alerts/{id}` — delete a single alert
+- `DELETE /api/alerts` — delete all alerts
 
-### Alerts
-- `GET /api/alerts` - Get alert history (with filters)
-- `GET /api/alerts/export` - Export alerts to CSV
-- `GET /api/alerts/stats` - Get alert statistics
-- `GET /api/alerts/buffer-status` - Get alert buffer status
+### Detection config
+- `GET  /api/detection/config` — read `config.json`
+- `POST /api/detection/config` — write `config.json` and hot-reload running workers
+- `POST /api/system/reload-presets` — re-read DB-stored presets for all workers
+
+### Presets (CRUD)
+- `GET/POST/PUT/DELETE /api/presets[...]`
+- `POST /api/presets/camera/{camera_id}/set-preset` — assign preset to a camera
+
+### EVLOS integration
+- `GET  /api/evlos/config`, `POST /api/evlos/test`
+- `GET  /api/evlos/failed-alerts`
+- `POST /api/evlos/enable`, `POST /api/evlos/disable` (runtime only)
 
 ### System
-- `GET /health` - Health check
-- `GET /api/metrics` - System metrics
-- `WebSocket /ws` - Real-time updates
+- `GET /health` — liveness probe
+- `GET /api/metrics` — process / GPU / camera-FPS metrics
+- `GET /api/system/memory` — detailed memory diagnostics
+- `WebSocket /ws` — real-time alert + camera-status broadcast
 
 ## Troubleshooting
 
