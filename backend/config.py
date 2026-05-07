@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # snapshot so per-tab load stays flat regardless of N clients.
     CAMERA_REFRESH_INTERVAL_SECONDS: int = 5
 
+    # F-010: How often the EVLOS spool drainer runs and how many alerts it
+    # tries to re-submit per pass. Defaults aim at ~120 alerts/hour without
+    # competing with live traffic.
+    EVLOS_DRAINER_INTERVAL_SECONDS: int = 300
+    EVLOS_DRAINER_BATCH_SIZE: int = 10
+
     class Config:
         env_file = "../.env"  # .env is in parent directory
         case_sensitive = True

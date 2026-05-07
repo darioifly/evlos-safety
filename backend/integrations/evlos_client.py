@@ -210,7 +210,8 @@ class EVLOSClient:
                       alert_type: str,
                       severity: str,
                       confidence: float,
-                      timestamp_str: str) -> Dict:
+                      timestamp_str: str,
+                      timeout: Optional[float] = None) -> Dict:
         """
         Execute HTTP request to EVLOS API
 
@@ -268,7 +269,7 @@ class EVLOSClient:
                 self.api_url,
                 files=files,
                 data=data,
-                timeout=self.timeout
+                timeout=timeout if timeout is not None else self.timeout
             )
 
             status_code = response.status_code
@@ -379,6 +380,114 @@ class EVLOSClient:
 
         except Exception as e:
             logger.error(f"Error saving failed alert to disk: {e}")
+
+    # F-010: drain spool of failed alerts.
+    # Per safety policy: a spool file is only deleted on a 2xx response.
+    # On any non-2xx or transport error the file stays in place.
+    # Corrupt JSON sidecars are renamed to *.json.poison so the drainer does
+    # not loop on them.
+    DRAIN_TIMEOUT_SECONDS = 5
+
+    def drain_failed_alerts(self, max_per_pass: int = 10) -> Dict:
+        """Re-submit up to max_per_pass pending failed alerts.
+
+        Iterates JSON sidecars in `self.failed_dir`, oldest first by mtime.
+        Returns a dict with attempted, succeeded, failed, remaining counts.
+        Skipped silently if disabled or if the directory does not exist.
+        """
+        result = {"attempted": 0, "succeeded": 0, "failed": 0, "remaining": 0}
+
+        if not self.enabled:
+            return result
+        if not self.failed_dir.exists():
+            return result
+
+        # Collect JSON sidecars, oldest first.
+        sidecars = sorted(
+            (p for p in self.failed_dir.iterdir() if p.suffix == ".json"),
+            key=lambda p: p.stat().st_mtime,
+        )
+
+        for sidecar in sidecars[:max_per_pass]:
+            result["attempted"] += 1
+            jpg_path = sidecar.with_suffix(".jpg")
+
+            # Parse JSON. Quarantine on parse error so we never loop on poison.
+            try:
+                with open(sidecar, "r") as f:
+                    payload = json.load(f)
+            except Exception as e:
+                logger.warning(
+                    f"EVLOS drainer: corrupt sidecar {sidecar.name} ({e}); quarantining"
+                )
+                try:
+                    sidecar.rename(sidecar.with_suffix(".json.poison"))
+                    if jpg_path.exists():
+                        jpg_path.rename(jpg_path.with_suffix(".jpg.poison"))
+                except OSError as rename_err:
+                    logger.warning(f"EVLOS drainer: poison rename failed: {rename_err}")
+                result["failed"] += 1
+                continue
+
+            # Read JPEG bytes.
+            try:
+                image_bytes = jpg_path.read_bytes()
+            except OSError as e:
+                logger.info(f"EVLOS drainer: cannot read {jpg_path.name} ({e}); skipping")
+                result["failed"] += 1
+                continue
+
+            # Re-submit using the existing transport. ONE attempt, short timeout.
+            try:
+                send_result = self._send_request(
+                    image_data=image_bytes,
+                    camera_id=payload.get("camera_id", ""),
+                    alert_type=payload.get("alert_type", "other"),
+                    severity=payload.get("severity", "medium"),
+                    confidence=payload.get("confidence"),
+                    timestamp_str=str(payload.get("timestamp", "")),
+                    timeout=self.DRAIN_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                logger.info(f"EVLOS drainer: transport error on {sidecar.name}: {e}")
+                result["failed"] += 1
+                continue
+
+            status_code = send_result.get("status_code")
+            if status_code is not None and 200 <= status_code < 300:
+                # Success: delete both files.
+                try:
+                    sidecar.unlink()
+                    if jpg_path.exists():
+                        jpg_path.unlink()
+                    result["succeeded"] += 1
+                except OSError as e:
+                    logger.warning(
+                        f"EVLOS drainer: sent OK but failed to delete {sidecar.name}: {e}"
+                    )
+                    result["failed"] += 1
+            else:
+                # Non-2xx: leave files in place.
+                logger.info(
+                    f"EVLOS drainer: {sidecar.name} not drained "
+                    f"(status={status_code} error={send_result.get('error')})"
+                )
+                result["failed"] += 1
+
+        # Count what's left.
+        try:
+            result["remaining"] = sum(
+                1 for p in self.failed_dir.iterdir() if p.suffix == ".json"
+            )
+        except OSError:
+            result["remaining"] = -1
+
+        logger.info(
+            f"EVLOS drain: attempted={result['attempted']} "
+            f"succeeded={result['succeeded']} failed={result['failed']} "
+            f"remaining={result['remaining']}"
+        )
+        return result
 
     def send_alert_async(self,
                         image_data: Union[bytes, str, Path],

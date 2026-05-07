@@ -118,6 +118,44 @@ async def _refresh_camera_snapshot_loop() -> None:
         await asyncio.sleep(interval)
 
 
+# F-010: drainer state, exposed via /api/health/details.
+evlos_drainer_last_run: Optional[str] = None
+evlos_drainer_last_result: Optional[dict] = None
+
+
+async def _evlos_drainer_loop():
+    """Periodic drainer for the EVLOS failed-alerts spool.
+
+    Runs once at startup with a larger batch to begin clearing any backlog,
+    then every EVLOS_DRAINER_INTERVAL_SECONDS with the smaller batch size.
+    """
+    global evlos_drainer_last_run, evlos_drainer_last_result
+
+    # Startup pass.
+    try:
+        result = await asyncio.to_thread(evlos_client.drain_failed_alerts, 50)
+        evlos_drainer_last_run = datetime.utcnow().isoformat()
+        evlos_drainer_last_result = result
+        logger.info(f"EVLOS drainer startup: {result}")
+    except Exception:
+        logger.exception("EVLOS drainer startup pass crashed")
+
+    interval = settings.EVLOS_DRAINER_INTERVAL_SECONDS
+    batch = settings.EVLOS_DRAINER_BATCH_SIZE
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            result = await asyncio.to_thread(evlos_client.drain_failed_alerts, batch)
+            evlos_drainer_last_run = datetime.utcnow().isoformat()
+            evlos_drainer_last_result = result
+            if result.get("attempted", 0) > 0:
+                logger.info(f"EVLOS drainer pass: {result}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("EVLOS drainer pass crashed; continuing")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown"""
@@ -149,6 +187,9 @@ async def lifespan(app: FastAPI):
     # F-001: start background camera-status snapshot refresher
     snapshot_task = asyncio.create_task(_refresh_camera_snapshot_loop())
 
+    # F-010: start EVLOS spool drainer (with startup backlog pass)
+    evlos_drainer_task = asyncio.create_task(_evlos_drainer_loop())
+
     logger.info("=" * 60)
     logger.info(f"Server started on http://{settings.HOST}:{settings.PORT}")
     logger.info("Video workers managed dynamically via API")
@@ -160,6 +201,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     cleanup_task.cancel()
     snapshot_task.cancel()
+    evlos_drainer_task.cancel()
     if worker_manager:
         worker_manager.stop_all()
 
@@ -293,6 +335,24 @@ async def health_details():
     if evlos_info.get("failed_dir_count", 0) > 100:
         status_summary = "degraded"
         reasons.append(f"{evlos_info['failed_dir_count']} failed EVLOS alerts")
+
+    # F-010: drainer state.
+    evlos_info["drainer_last_run"] = evlos_drainer_last_run
+    evlos_info["drainer_last_result"] = evlos_drainer_last_result
+    uptime = time.monotonic() - app_started_at
+    drainer_interval = settings.EVLOS_DRAINER_INTERVAL_SECONDS
+    if evlos_drainer_last_run is None and uptime > drainer_interval:
+        status_summary = "degraded"
+        reasons.append("EVLOS drainer never ran")
+    elif evlos_drainer_last_run is not None:
+        try:
+            last = datetime.fromisoformat(evlos_drainer_last_run)
+            age = (datetime.utcnow() - last).total_seconds()
+            if age > 2 * drainer_interval:
+                status_summary = "degraded"
+                reasons.append(f"EVLOS drainer stale ({age:.0f}s)")
+        except Exception:
+            pass
 
     # --- Alerts backlog ---
     try:
