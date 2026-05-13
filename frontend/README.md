@@ -121,8 +121,15 @@ npm run dev
 # Create production build
 npm run build
 
-# Output: dist/
+# Output: dist/  (gitignored — must be rebuilt on each clone)
 ```
+
+`npm run build` is required before end-users can open the app via FastAPI on
+`http://<server-ip>:7002/`. FastAPI serves `frontend/dist/` as a SPA when it
+exists; otherwise `/` returns a 503 with build instructions and the API
+endpoints continue to work. `npm run dev` (Vite on :5173 with HMR) is still
+the developer workflow — it proxies `/api`, `/ws`, and `/static` to
+`:7002`.
 
 ### Preview
 ```bash

@@ -9,14 +9,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 
 from config import settings
 from utils.logger import logger
-from utils.screenshot import cleanup_screenshot_dir
 from database import db
 from services.nx_witness import NxWitnessClient
 from services.video_worker_manager import VideoWorkerManager
@@ -1081,29 +1080,17 @@ async def websocket_endpoint(websocket: WebSocket):
 # ============================================================================
 
 async def periodic_cleanup():
-    """Periodic database + screenshot file cleanup (F-009)"""
+    """Periodic database row cleanup.
+
+    Alert/detection screenshots on disk (data/static/alerts, data/alert_screenshots)
+    are an evidence archive and MUST NOT be cleaned automatically.
+    """
     while True:
         try:
-            # Cleanup old data every hour
             await asyncio.sleep(3600)
             logger.info("Running database cleanup...")
             db.cleanup_old_detections(days=7)
             db.cleanup_old_alerts(days=7)
-
-            # F-009: also clean the actual JPEG files (DB rows alone don't
-            # release disk). Run the filesystem walk in a thread.
-            backend_dir = Path(__file__).parent
-            deleted_a = await asyncio.to_thread(
-                cleanup_screenshot_dir, backend_dir / "data" / "static" / "alerts", 7
-            )
-            deleted_b = await asyncio.to_thread(
-                cleanup_screenshot_dir, backend_dir / settings.ALERT_SCREENSHOT_DIR, 7
-            )
-            if deleted_a or deleted_b:
-                logger.info(
-                    f"periodic_cleanup: deleted {deleted_a + deleted_b} old screenshot files"
-                )
-
             logger.info("✓ Database cleanup complete")
         except asyncio.CancelledError:
             break
@@ -1133,26 +1120,34 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     logger.info(f"Serving static files from {static_dir}")
 
-# Serve frontend if built
+# Serve frontend if built. End-users open http://<server-ip>:7002/ and get
+# the SPA from this same FastAPI process — no separate Vite dev server
+# needed. The catch-all MUST be registered last so it doesn't shadow API
+# routes, /health, or static mounts above.
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
-if frontend_dist.exists():
+if frontend_dist.exists() and (frontend_dist / "index.html").exists():
     app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="assets")
     logger.info(f"Serving React frontend from {frontend_dist}")
 
-    @app.get("/{full_path:path}")
+    @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_frontend(full_path: str):
-        # Don't intercept API, WebSocket, or static file routes
-        if full_path.startswith(('api/', 'ws/', 'health', 'screenshots/', 'static/', 'assets/')):
-            # Let FastAPI handle these routes
-            return None
-
-        file_path = frontend_dist / full_path
-        if file_path.exists() and file_path.is_file():
-            return FileResponse(file_path)
-        return FileResponse(frontend_dist / "index.html")
+        # Some assets sit at the root of dist (favicon, manifest, etc.).
+        candidate = frontend_dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        # Everything else: hand back index.html for client-side routing.
+        return FileResponse(str(frontend_dist / "index.html"))
 else:
     logger.warning(f"Frontend build not found at {frontend_dist}")
     logger.warning("Run 'cd frontend && npm run build' to create production build")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def frontend_not_built(full_path: str):
+        return PlainTextResponse(
+            "Frontend not built. Run:\n  cd frontend && npm run build\n"
+            "Then restart the backend.",
+            status_code=503,
+        )
 
 
 # ============================================================================

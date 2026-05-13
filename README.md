@@ -132,6 +132,24 @@ python main_sqlite.py
 
 Access the application: http://localhost:7002
 
+### LAN access (end-users on other PCs)
+
+1. Build the frontend once: `cd frontend && npm run build`.
+2. Start the backend: `python backend/main_sqlite.py` (or `start_fastapi.bat`).
+3. From any PC on the LAN, open: `http://<server-ip>:7002/`.
+
+Find the server IP with `ipconfig` on Windows (look for the IPv4 address of
+the relevant adapter). The backend logs both `localhost` and a LAN IP
+candidate at startup; use the one printed under `Open from LAN PCs:`.
+
+If LAN clients can't connect:
+- Windows Firewall may be blocking inbound port 7002. Add an inbound rule:
+  ```powershell
+  New-NetFirewallRule -DisplayName "evlos-safety FastAPI" `
+      -Direction Inbound -Protocol TCP -LocalPort 7002 -Action Allow
+  ```
+- Confirm the backend's startup log shows `Starting uvicorn on 0.0.0.0:7002`.
+
 ## Usage
 
 ### 1. Camera Grid

@@ -64,8 +64,14 @@ The repo-root scripts `start_fastapi.bat` and `backend/restart_backend.bat`
 invoke this entry point.
 
 The server listens on `HOST:PORT` from `.env` / `config.py` (default
-`0.0.0.0:7002`). The frontend dev server (Vite, port 5173) proxies `/api` and
-`/ws` to this backend.
+`0.0.0.0:7002`, all interfaces so LAN PCs can connect). The frontend dev
+server (Vite, port 5173) proxies `/api`, `/ws`, and `/static` to this backend.
+
+If `frontend/dist/index.html` exists, FastAPI also serves the built SPA
+at `/` so end-users can open `http://<server-ip>:7002/` from any LAN PC
+without running the Vite dev server. If `dist/` is missing, requests to
+`/` get a 503 with instructions to run `cd frontend && npm run build`;
+API endpoints continue to work.
 
 ## Configuration
 
