@@ -1,12 +1,10 @@
 import axios from 'axios'
 
-// Determine API base URL
-const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-const API_BASE_URL = isDev ? 'http://localhost:7002' : ''
-
-// Create axios instance with baseURL
+// API calls always go to the same origin that served the page.
+// - Built mode: FastAPI on :7002 serves both the SPA and the API.
+// - Vite dev mode (:5173): vite.config.js proxies /api and /ws to :7002.
 const api = axios.create({
-  baseURL: API_BASE_URL,
+  baseURL: '',
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json'

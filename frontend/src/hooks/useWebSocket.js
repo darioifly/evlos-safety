@@ -14,17 +14,15 @@ export function useWebSocket(url) {
 
   const connect = useCallback(() => {
     try {
-      // Determine WebSocket URL
+      // Determine WebSocket URL — always same-origin as the page.
+      // Built mode: FastAPI on :7002 serves both the page and /ws.
+      // Vite dev mode (:5173): vite.config.js proxies /ws to :7002.
       let wsUrl
       if (url.startsWith('ws')) {
         wsUrl = url
       } else {
-        // In development, connect directly to backend port 7002
-        // In production, use same host as the page
-        const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-        const backendPort = isDev ? '7002' : window.location.port
-        const host = isDev ? `${window.location.hostname}:${backendPort}` : window.location.host
-        wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${host}${url}`
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+        wsUrl = `${proto}//${window.location.host}${url}`
       }
 
       console.log('Connecting to WebSocket:', wsUrl)

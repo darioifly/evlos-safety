@@ -224,7 +224,7 @@ export default function AlertLog({ wsData }) {
                     <div className="flex gap-2">
                       {alert.full_image_path && (
                         <a
-                          href={`http://localhost:7002${alert.full_image_path}`}
+                          href={alert.full_image_path}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-blue-600 hover:text-blue-800 underline"
@@ -234,7 +234,7 @@ export default function AlertLog({ wsData }) {
                       )}
                       {alert.cropped_image_path && (
                         <a
-                          href={`http://localhost:7002${alert.cropped_image_path}`}
+                          href={alert.cropped_image_path}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-blue-600 hover:text-blue-800 underline"

@@ -15,6 +15,10 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
         rewrite: (path) => path
+      },
+      '/static': {
+        target: 'http://localhost:7002',
+        changeOrigin: true
       }
     }
   },
