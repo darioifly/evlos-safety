@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     EVLOS_FAILED_DIR: str = "data/evlos_failed_alerts"  # Directory for failed alerts
 
     # Server Configuration
-    HOST: str = "0.0.0.0"
+    HOST: str = "0.0.0.0"  # bind on all interfaces so LAN PCs can connect
     PORT: int = 7002
     LOG_LEVEL: str = "INFO"  # INFO for cleaner logs (use DEBUG for troubleshooting)
     LOG_DIR: str = "logs"

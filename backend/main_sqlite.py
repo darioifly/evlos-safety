@@ -259,7 +259,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # required by spec when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1176,6 +1176,17 @@ if __name__ == "__main__":
 
     logger.info("Starting FastAPI server in SQLite mode...")
     logger.info("Make sure to run video_worker.py in a separate terminal!")
+
+    import socket
+    hostname = socket.gethostname()
+    try:
+        lan_ip = socket.gethostbyname(hostname)
+    except OSError:
+        lan_ip = "unknown"
+    logger.info(f"Starting uvicorn on {settings.HOST}:{settings.PORT} "
+                f"(hostname={hostname}, LAN IP candidate={lan_ip})")
+    logger.info(f"Open from this PC:   http://localhost:{settings.PORT}/")
+    logger.info(f"Open from LAN PCs:   http://{lan_ip}:{settings.PORT}/")
 
     uvicorn.run(
         "main_sqlite:app",
