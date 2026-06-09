@@ -93,6 +93,10 @@ The backend listens on port **7002** (configurable via `PORT` in `.env`). The
 frontend dev server runs on **5173** and proxies `/api` and `/ws` to the
 backend.
 
+> **Production / single-host deploy:** the recommended path is the
+> containerized stack — single image, GPU via WSL2, persistent bind mounts,
+> Windows boot-time autostart. See [DOCKER.md](DOCKER.md).
+
 ### Development Mode
 
 **Terminal 1 — Backend:**
@@ -373,7 +377,7 @@ tail -f logs/detection_$(date +%Y%m%d).log
 For issues and questions:
 1. Check this README
 2. Review logs in `logs/` directory
-3. Check API documentation at http://localhost:8000/docs
+3. Check API documentation at http://localhost:7002/docs
 4. Contact support team
 
 ## Version

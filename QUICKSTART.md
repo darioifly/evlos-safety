@@ -1,5 +1,12 @@
 # Quick Start Guide
 
+> **Production deploy on this host:** prefer the containerized stack —
+> single image with GPU passthrough via WSL2, persistent bind mounts, and
+> Windows boot-time autostart. See **[DOCKER.md](DOCKER.md)**.
+>
+> The bare-metal steps below remain valid for development, but
+> production runs in Docker.
+
 ## 🚀 Fast Setup (Windows)
 
 ### 1. Run Setup Script
@@ -28,14 +35,14 @@ NX_ADMIN_PASSWORD=Sicurezza12!
 ```bash
 start_dev.bat
 ```
-- Backend: http://localhost:8000
+- Backend: http://localhost:7002
 - Frontend: http://localhost:5173
 
 **Production Mode**:
 ```bash
 start_prod.bat
 ```
-- Full system: http://localhost:8000
+- Full system: http://localhost:7002
 
 ## ⚙️ Manual Setup
 
@@ -45,7 +52,7 @@ cd backend
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+python main_sqlite.py
 ```
 
 ### Frontend
@@ -59,7 +66,7 @@ npm run build     # Production build
 ## 🎯 First Steps After Installation
 
 1. **Check Camera Connection**
-   - Open http://localhost:5173 (dev) or http://localhost:8000 (prod)
+   - Open http://localhost:5173 (dev) or http://localhost:7002 (prod)
    - Go to "Cameras" tab
    - Verify cameras appear with "Online" status
 
@@ -86,8 +93,8 @@ npm run build     # Production build
 
 ### "CUDA not available"
 ```bash
-# Install PyTorch with CUDA support
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# Install PyTorch with CUDA 12.1 support (matches ultralytics 8.3.x)
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 ```
 
 ### "Cannot connect to NxWitness"
@@ -106,15 +113,17 @@ npm run build
 ### Port already in use
 Change port in `.env`:
 ```env
-PORT=8001
+PORT=7003
 ```
+Or stop whichever process is holding `7002` (bare-metal Python *or* the
+container — they share the same port).
 
 ## 📊 System Check
 
 After startup, verify:
-- ✅ Backend API: http://localhost:8000/health
-- ✅ API Docs: http://localhost:8000/docs
-- ✅ Frontend: http://localhost:5173 (dev) or http://localhost:8000 (prod)
+- ✅ Backend API: http://localhost:7002/health
+- ✅ API Docs: http://localhost:7002/docs
+- ✅ Frontend: http://localhost:5173 (dev) or http://localhost:7002 (prod)
 - ✅ WebSocket: Check connection status in UI header
 
 ## 🎬 Video Tutorial
@@ -129,5 +138,5 @@ See [README.md](README.md) for complete documentation.
 
 1. Check logs in `logs/` directory
 2. Review [README.md](README.md) troubleshooting section
-3. Check API documentation at http://localhost:8000/docs
+3. Check API documentation at http://localhost:7002/docs
 4. Contact support team
