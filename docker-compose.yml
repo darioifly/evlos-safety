@@ -1,0 +1,109 @@
+# =============================================================================
+# evlos-safety — production single-container stack
+# =============================================================================
+# Best practice notes captured here, not in code:
+#  * One container, one process: FastAPI + WebSocket + YOLO threads live in
+#    main_sqlite.py — no separate worker process (the legacy video_worker.py
+#    is dead code).
+#  * `env_file: .env` keeps secrets OUT of the image (.env is gitignored and
+#    .dockerignore'd).
+#  * Bind mounts (not named volumes) for inspectability: the operator can
+#    open backend/data/static/alerts/ and backend/logs/ in Windows Explorer.
+#  * `restart: unless-stopped` is the foundation of boot-time autostart —
+#    once Docker Desktop is up after Windows login, the container is brought
+#    back automatically. The Scheduled Task in scripts/start-evlos-stack.bat
+#    is a robustness backstop, not the primary mechanism.
+#  * GPU is reserved via the Compose device-reservations syntax — this is
+#    the supported way to grant NVIDIA GPUs to compose-managed containers.
+
+services:
+  evlos-safety:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: evlos-safety:latest
+    container_name: evlos-safety
+
+    # Backend binds 0.0.0.0:7002 (config.py) and serves the SPA from the same
+    # port. Frontend uses RELATIVE URLs (api.js / useWebSocket.js), so LAN
+    # clients only need this single port open.
+    ports:
+      - "7002:7002"
+
+    # Secrets and runtime overrides come from the host .env at the repo root.
+    # Pydantic-settings inside the container still loads via env vars first,
+    # so anything defined here (NX_ADMIN_PASSWORD, EVLOS_API_URL, etc.) wins
+    # over the defaults baked into backend/config.py.
+    env_file:
+      - .env
+
+    # GPU passthrough. Requires:
+    #   * NVIDIA Windows driver with WSL2 support (581.95+ verified OK).
+    #   * Docker Desktop with the WSL2 backend AND NVIDIA GPU integration on.
+    # Verify after `docker compose up -d` with:
+    #   docker compose exec evlos-safety nvidia-smi
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # --- Persistent state ---
+    # Every path the live code reads/writes is mounted from the host so it
+    # survives `docker compose down`/recreate. Paths chosen to match the
+    # absolute paths main_sqlite.py and video_worker_manager.py compute
+    # via Path(__file__).parent[.parent] — see the WORKDIR comment in the
+    # Dockerfile.
+    volumes:
+      # SQLite — the single source of truth.
+      # WAL side files (*-wal, *-shm) live next to the .db; mounting the
+      # whole directory means they survive together.
+      - ./backend/database:/app/backend/database
+
+      # Alert/evidence archive AND the EVLOS failed-alerts retry spool.
+      # NOTE: the screenshots in data/static/alerts/ are treated as a
+      # permanent evidence archive — the in-process cleanup task has been
+      # disabled accordingly (see periodic_cleanup in main_sqlite.py).
+      - ./backend/data:/app/backend/data
+
+      # Rotating log files (50 MB × 30 backups via WindowsSafeRotatingFileHandler).
+      - ./backend/logs:/app/backend/logs
+
+      # Hot-reloaded runtime config (PPE rules, schedule, model selection, etc.).
+      # File bind-mount: the operator edits this on the host, the container
+      # picks the new values up on POST /api/detection/config.
+      - ./backend/config.json:/app/backend/config.json
+
+      # PPE / helmet-vest / SH17 weights live here (~290 MB), referenced by
+      # config.json as "models/ppe/helmet_vest.pt".
+      - ./backend/models:/app/backend/models
+
+      # The small YOLOv8n person-detection model (~6.5 MB). Baking it would
+      # bloat the image; bind-mounting also means a `git pull` of a newer
+      # weights file is picked up without rebuild.
+      - ./backend/yolov8n.pt:/app/backend/yolov8n.pt
+
+    # Best practice: auto-restart on crash AND on Docker engine start —
+    # combined with Docker Desktop's "start on login", this is what gives
+    # the platform a working boot-time autostart on Windows.
+    restart: unless-stopped
+
+    # Healthcheck is also defined in the Dockerfile (start-period covers
+    # cold-start YOLO load + worker restore). Re-stating here to make the
+    # compose-level status visible in `docker compose ps`.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7002/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+
+    # Same log driver caps Docker's own stdout/stderr collection (separate
+    # from the app's rotating files under /app/backend/logs).
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
