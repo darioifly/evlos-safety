@@ -1,0 +1,88 @@
+# =============================================================================
+# .dockerignore — keep the build context lean and secrets/state out of images
+# =============================================================================
+# Best practice: deny-by-default would be ideal, but Docker doesn't honour an
+# empty-then-allowlist pattern reliably, so we explicitly enumerate what
+# must NEVER land in any image layer.
+
+# --- Secrets (must come from env_file at runtime, never baked) ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# --- Runtime state (lives in bind-mounted volumes) ---
+backend/database/*.db
+backend/database/*.db-wal
+backend/database/*.db-shm
+backend/database/*.sqlite
+backend/database/*.sqlite-wal
+backend/database/*.sqlite-shm
+backend/surveillance.db
+backend/data/
+backend/logs/
+backend/static/alerts/
+
+# --- Model weights (large; come from bind-mounted volumes) ---
+*.pt
+backend/models/
+
+# --- Build artefacts (re-built by the Dockerfile's stage 1) ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# --- Python build/dev artefacts ---
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+backend/venv/
+backend/.venv/
+**/venv/
+**/.venv/
+*.egg-info/
+
+# --- VCS / IDE / OS ---
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
+
+# --- Docs and audits — not needed in the runtime image ---
+docs/
+*.md
+!backend/README.md
+
+# --- Windows launchers — irrelevant inside the Linux container ---
+*.bat
+*.vbs
+*.ps1
+
+# --- Misc / ad-hoc scripts that aren't part of the live entrypoint ---
+backend/check_*.py
+backend/test_*.py
+backend/download_*.py
+backend/quick_download_ppe.py
+backend/compare_helmet_models.py
+backend/restart_backend.py
+backend/migrate_*.py
+backend/database/migrate_*.py
+backend/tests/
+check_gpu.py
+test_*.py
+
+# --- Image build outputs we never want recursing back in ---
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
