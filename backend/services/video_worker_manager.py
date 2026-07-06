@@ -82,6 +82,16 @@ class CameraWorker:
         # CUDA-OOM degrade ladder: caps inferenceSize after an OOM.
         self._imgsz_cap = None
 
+        # Load detection configuration from database
+        self.detection_config = db.get_camera_detection_config(camera_id)
+        if not self.detection_config:
+            # Default to intrusion mode with preset 1
+            db.set_camera_detection_mode(camera_id, 'intrusion', 1)
+            self.detection_config = db.get_camera_detection_config(camera_id)
+
+        global_confidence = self.config.get('confidence', 0.5)
+        logger.info(f"[{camera_name}] Detection mode: {self.detection_config.get('detection_mode', 'intrusion')}, Global confidence: {global_confidence}")
+
     def _cfg_float(self, key, default):
         """Read a float from hot-reloadable config; a typo must not crash."""
         try:
@@ -98,16 +108,6 @@ class CameraWorker:
             logger.warning(f"[{self.camera_name}] Invalid config value for "
                            f"'{key}': {self.config.get(key)!r}; using {default}")
             return int(default)
-
-        # Load detection configuration from database
-        self.detection_config = db.get_camera_detection_config(camera_id)
-        if not self.detection_config:
-            # Default to intrusion mode with preset 1
-            db.set_camera_detection_mode(camera_id, 'intrusion', 1)
-            self.detection_config = db.get_camera_detection_config(camera_id)
-
-        global_confidence = self.config.get('confidence', 0.5)
-        logger.info(f"[{camera_name}] Detection mode: {self.detection_config.get('detection_mode', 'intrusion')}, Global confidence: {global_confidence}")
 
     def start(self):
         """Start the worker thread"""
