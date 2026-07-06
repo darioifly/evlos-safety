@@ -15,6 +15,7 @@ from ultralytics import YOLO
 from config import settings
 from utils.logger import logger
 from database import db
+from services import ppe_logic
 from services.nx_witness import nx_client
 from integrations.evlos_client import evlos_client
 
@@ -68,6 +69,36 @@ class CameraWorker:
         self.last_alert_time = 0
         self.running = False
 
+        # Temporal N-of-M voting: a violation must persist across several
+        # analyzed frames before it can alert (kills single-frame flicker).
+        self._temporal = self._build_temporal_filter()
+        # Per violation-type timestamp of the last alert, for re-alert pacing.
+        self._last_type_alert = {}
+        # Last mode actually run, to reset temporal voting on day/night flips.
+        self._last_mode = None
+        # Last frame that actually contained the violations (evidence for
+        # alerts whose confirming frame happens to be clean).
+        self._violation_evidence = None
+        # CUDA-OOM degrade ladder: caps inferenceSize after an OOM.
+        self._imgsz_cap = None
+
+    def _cfg_float(self, key, default):
+        """Read a float from hot-reloadable config; a typo must not crash."""
+        try:
+            return float(self.config.get(key, default))
+        except (TypeError, ValueError):
+            logger.warning(f"[{self.camera_name}] Invalid config value for "
+                           f"'{key}': {self.config.get(key)!r}; using {default}")
+            return float(default)
+
+    def _cfg_int(self, key, default):
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            logger.warning(f"[{self.camera_name}] Invalid config value for "
+                           f"'{key}': {self.config.get(key)!r}; using {default}")
+            return int(default)
+
         # Load detection configuration from database
         self.detection_config = db.get_camera_detection_config(camera_id)
         if not self.detection_config:
@@ -115,11 +146,26 @@ class CameraWorker:
         logger.info(f"[{self.camera_name}] Worker stopped")
         return True
 
+    def _build_temporal_filter(self):
+        """Build the N-of-M temporal filter from config (with safe defaults)."""
+        return ppe_logic.TemporalViolationFilter(
+            window=self._cfg_int('temporalWindow', 5),
+            min_hits=self._cfg_int('temporalMinHits', 3),
+            max_age_seconds=self._cfg_float('temporalMaxAgeSeconds', 90.0),
+        )
+
     def _run(self):
         """Main worker loop"""
         logger.info(f"[{self.camera_name}] Worker thread started")
 
+        # Exponential backoff when the stream/inference dies immediately
+        # after (re)connecting — e.g. a CUDA crash loop or a dead camera.
+        # A run shorter than this counts as a failure.
+        MIN_HEALTHY_RUN_SECONDS = 30
+        consecutive_failures = 0
+
         while not self.stop_event.is_set():
+            run_started = time.time()
             try:
                 # Get stream quality from config
                 stream_quality = self.config.get("streamQuality", "medium")
@@ -133,11 +179,29 @@ class CameraWorker:
                     camera_name=self.camera_name,
                     stream_connected=False
                 )
-                # Wait before retry, but check stop_event frequently
-                for _ in range(50):  # 5 seconds with 100ms checks
-                    if self.stop_event.is_set():
-                        break
-                    time.sleep(0.1)
+
+            if self.stop_event.is_set():
+                break
+
+            if time.time() - run_started < MIN_HEALTHY_RUN_SECONDS:
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+
+            # 5s after a healthy run; 10s, 20s ... capped at 300s while broken.
+            delay = min(300, 5 * (2 ** min(consecutive_failures, 6)))
+            if consecutive_failures:
+                logger.warning(
+                    f"[{self.camera_name}] Stream died after "
+                    f"{time.time() - run_started:.0f}s "
+                    f"({consecutive_failures} consecutive failures); "
+                    f"retrying in {delay}s"
+                )
+            # Wait before retry, but check stop_event frequently
+            for _ in range(int(delay * 10)):
+                if self.stop_event.is_set():
+                    break
+                time.sleep(0.1)
 
     def _process_stream(self, stream_url: str):
         """Process camera stream"""
@@ -211,26 +275,99 @@ class CameraWorker:
             logger.error(f"[{self.camera_name}] Stream error: {e}")
             db.upsert_camera_status(self.camera_id, self.camera_name, stream_connected=False)
 
+    def _class_confidence(self) -> dict:
+        """Per-class thresholds: config.json overrides on top of defaults."""
+        thresholds = dict(ppe_logic.DEFAULT_CLASS_CONFIDENCE)
+        overrides = self.config.get('classConfidence', {})
+        if isinstance(overrides, dict):
+            for cls, value in overrides.items():
+                try:
+                    thresholds[cls] = float(value)
+                except (TypeError, ValueError):
+                    pass
+        return thresholds
+
+    def _effective_detection_mode(self) -> str:
+        """Resolve the mode to run NOW for this camera.
+
+        Cameras set to 'ppe' honour the global dual-mode schedule from
+        config.json: PPE compliance during working hours, intrusion
+        detection at night (a PPE model on dark/IR frames only produces
+        noise, while any person at night IS the event of interest).
+        """
+        mode = self.detection_config.get('detection_mode', 'intrusion')
+        if mode != 'ppe' or self.config.get('detectionMode') != 'dual':
+            return mode
+        schedule = self.config.get('schedule', {})
+        try:
+            day_start = int(schedule.get('dayStartHour', 6))
+            day_end = int(schedule.get('dayEndHour', 18))
+        except (TypeError, ValueError):
+            return mode
+        hour = datetime.now().hour
+        if day_start <= day_end:
+            is_day = day_start <= hour < day_end
+        else:  # overnight window (e.g. 22 -> 6)
+            is_day = hour >= day_start or hour < day_end
+        return 'ppe' if is_day else 'intrusion'
+
     def _process_frame(self, frame):
         """Process single frame with YOLO"""
-        # Resize
-        stream_width = self.config.get("streamWidth", 640)
-        stream_height = self.config.get("streamHeight", 480)
-        frame = cv2.resize(frame, (stream_width, stream_height))
+        detection_mode = self._effective_detection_mode()
 
-        # Get detection mode
-        detection_mode = self.detection_config.get('detection_mode', 'intrusion')
+        # Reset temporal voting when the effective mode flips (day/night):
+        # votes from the previous shift must not combine with fresh noise.
+        if detection_mode != self._last_mode:
+            if self._last_mode is not None:
+                logger.info(f"[{self.camera_name}] Detection mode switch: "
+                            f"{self._last_mode} -> {detection_mode}")
+                self._temporal.reset()
+                self._violation_evidence = None
+            self._last_mode = detection_mode
 
-        # YOLO detection with global confidence threshold from config.json
-        # The global confidence setting from /#config takes precedence over preset-specific values
-        confidence = self.config.get('confidence', 0.5)
-
-        # Use lock for thread-safe CUDA inference
-        if self.model_lock:
-            with self.model_lock:
-                results = self.model(frame, conf=confidence, verbose=False)
+        # Inference threshold: in PPE mode run at the LOWEST per-class
+        # threshold and post-filter per class (violation classes need much
+        # stronger evidence than person/compliance classes). In intrusion
+        # mode use the preset's confidence, falling back to the global one
+        # (clamped: a stale low preset value must not open the floodgates).
+        if detection_mode == 'ppe':
+            confidence = min(self._class_confidence().values())
         else:
-            results = self.model(frame, conf=confidence, verbose=False)
+            try:
+                preset_conf = float(self.detection_config.get('intrusion_confidence') or 0.0)
+            except (TypeError, ValueError):
+                preset_conf = 0.0
+            confidence = preset_conf if preset_conf >= 0.4 else self._cfg_float('confidence', 0.5)
+
+        # NO pre-resize: the frame goes to YOLO at native resolution and
+        # ultralytics letterboxes it to imgsz. The old fixed 640x480 resize
+        # both distorted the aspect ratio and destroyed the detail needed
+        # to judge PPE on distant workers.
+        imgsz = self._cfg_int('inferenceSize', 1280)
+        if self._imgsz_cap:
+            imgsz = min(imgsz, self._imgsz_cap)
+
+        # Use lock for thread-safe CUDA inference. On CUDA OOM, degrade the
+        # inference size (1280 -> 960 -> 640) instead of crash-looping.
+        try:
+            if self.model_lock:
+                with self.model_lock:
+                    results = self.model(frame, conf=confidence, imgsz=imgsz, verbose=False)
+            else:
+                results = self.model(frame, conf=confidence, imgsz=imgsz, verbose=False)
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                new_cap = 960 if imgsz > 960 else 640
+                if imgsz <= 640:
+                    raise  # nothing left to degrade — surface the error
+                self._imgsz_cap = new_cap
+                logger.error(
+                    f"[{self.camera_name}] CUDA OOM at imgsz={imgsz}; "
+                    f"degrading inference size to {new_cap}. "
+                    f"Consider lowering 'inferenceSize' in config.json."
+                )
+                return  # skip this frame; next one runs at the lower size
+            raise
         boxes = results[0].boxes
 
         # Process based on detection mode
@@ -260,323 +397,207 @@ class CameraWorker:
         if person_count >= min_persons:
             self._trigger_alert(frame, boxes, person_count, 'intrusion', alert_cooldown)
 
-    def _count_persons_without_vest(self, persons: list, vests: list) -> int:
+    # Strict fluorescent hi-vis ranges in HSV (OpenCV H in [0,180]).
+    # Deliberately NARROW: the previous broad ranges (red H0-25 + green up
+    # to H95 at low saturation) matched rust, brick, vegetation and orange
+    # barrier fencing, silently flipping REAL novest detections to 'vest'.
+    HIVIS_COLOR_RANGES = {
+        'orange': [((5, 120, 120), (20, 255, 255))],
+        'yellow': [((20, 100, 140), (40, 255, 255))],
+        'green': [((40, 100, 120), (75, 255, 255))],
+        'red': [((0, 140, 100), (5, 255, 255)),
+                ((175, 140, 100), (180, 255, 255))],
+    }
+
+    # ROIs smaller than this cannot be judged by colour statistics.
+    HIVIS_MIN_ROI_PIXELS = 400
+
+    def _has_hivis_color(self, frame, box_xyxy, threshold=0.20, colors=None):
         """
-        Count how many persons don't have an overlapping vest detection.
-        Uses Intersection over Union (IoU) to determine if vest overlaps with person.
+        Check whether the (unexpanded) box contains a meaningful fraction of
+        FLUORESCENT hi-vis pixels. Used to override a confident 'novest'
+        detection when the person is clearly wearing hi-vis.
 
-        Args:
-            persons: List of person detections with 'xyxy' coordinates
-            vests: List of vest detections with 'xyxy' coordinates
-
-        Returns:
-            Number of persons without a matching vest
-        """
-        def calculate_iou(box1, box2):
-            """Calculate Intersection over Union between two boxes"""
-            x1 = max(box1[0], box2[0])
-            y1 = max(box1[1], box2[1])
-            x2 = min(box1[2], box2[2])
-            y2 = min(box1[3], box2[3])
-
-            intersection = max(0, x2 - x1) * max(0, y2 - y1)
-            area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-            area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-            union = area1 + area2 - intersection
-
-            return intersection / union if union > 0 else 0
-
-        def vest_overlaps_person(person_box, vest_box):
-            """Check if vest bounding box overlaps with person (vest should be inside person)"""
-            # Check if vest center is within person bounding box
-            vest_center_x = (vest_box[0] + vest_box[2]) / 2
-            vest_center_y = (vest_box[1] + vest_box[3]) / 2
-
-            in_person = (person_box[0] <= vest_center_x <= person_box[2] and
-                        person_box[1] <= vest_center_y <= person_box[3])
-
-            # Also check IoU as fallback
-            iou = calculate_iou(person_box, vest_box)
-
-            return in_person or iou > 0.1  # Low IoU threshold since vest is smaller than person
-
-        persons_without_vest = 0
-        for person in persons:
-            has_vest = False
-            for vest in vests:
-                if vest_overlaps_person(person['xyxy'], vest['xyxy']):
-                    has_vest = True
-                    break
-            if not has_vest:
-                persons_without_vest += 1
-
-        return persons_without_vest
-
-    def _has_hivis_color(self, frame, box_xyxy, threshold=0.08):
-        """
-        Check if ROI contains hi-vis colored pixels.
-        Used to override false 'novest' detections when vest is actually present.
-
-        Handles multiple scenarios:
-        - Closed vests (full ROI analysis)
-        - Open vests (lateral strips)
-        - Distant persons (center vertical strip + relaxed color thresholds)
+        Strict by design: no ROI expansion, no relaxed "distant" thresholds
+        — a wrong override here suppresses a REAL safety violation.
 
         Args:
             frame: BGR image (numpy array)
             box_xyxy: Bounding box coordinates [x1, y1, x2, y2]
-            threshold: Minimum percentage of hi-vis pixels required (default 8%)
+            threshold: Minimum fraction of hi-vis pixels required
+            colors: iterable of range names from HIVIS_COLOR_RANGES
 
         Returns:
-            True if hi-vis color detected above threshold
+            True if hi-vis colour covers at least `threshold` of the box
         """
-        x1, y1, x2, y2 = map(int, box_xyxy)
-
-        # Expand ROI by 30% to capture more area (hi-vis might be partially outside box)
-        box_w = x2 - x1
-        box_h = y2 - y1
-        expand_x = int(box_w * 0.30)
-        expand_y = int(box_h * 0.30)
-        x1 -= expand_x
-        y1 -= expand_y
-        x2 += expand_x
-        y2 += expand_y
-
-        # Ensure coordinates are within frame bounds
         h, w = frame.shape[:2]
+        x1, y1, x2, y2 = map(int, box_xyxy)
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(w, x2), min(h, y2)
-
         if x2 <= x1 or y2 <= y1:
             return False
 
         roi = frame[y1:y2, x1:x2]
-
-        if roi.size == 0:
+        total_pixels = roi.shape[0] * roi.shape[1]
+        if total_pixels < self.HIVIS_MIN_ROI_PIXELS:
+            # Too small to judge by colour: leave the model's verdict alone.
             return False
 
-        roi_h, roi_w = roi.shape[:2]
-        total_pixels = roi_h * roi_w
+        if not colors:
+            colors = ('orange', 'yellow', 'green')
 
-        # Determine if this is a "distant" person (small bounding box)
-        # Small boxes have more background noise, need different strategy
-        is_distant = (roi_w * roi_h) < 5000  # Less than ~70x70 pixels
-
-        # Hi-vis color ranges in HSV (calibrated from construction site screenshots)
-        # Format: (H_min, S_min, V_min), (H_max, S_max, V_max)
-        # Note: In HSV, red wraps around - H=0 and H=170-180 are both red
-        hi_vis_ranges = [
-            ((0, 70, 50), (10, 255, 255)),      # Red (pure red, H=0-10)
-            ((170, 70, 50), (180, 255, 255)),   # Red-wrap (red at high hue values)
-            ((0, 80, 80), (25, 255, 255)),      # Orange (includes red-orange)
-            ((25, 80, 120), (45, 255, 255)),    # Yellow
-            ((45, 60, 80), (95, 255, 255)),     # Green (lime/fluo)
-        ]
-
-        # Relaxed ranges for distant persons (lower saturation due to distance/compression)
-        # Note: In HSV, red wraps around (H=0 and H=170-180 are both red)
-        hi_vis_ranges_relaxed = [
-            ((0, 50, 40), (10, 255, 255)),      # Red - lower S,V for distant/dark red
-            ((170, 50, 40), (180, 255, 255)),   # Red-wrap - for distant
-            ((0, 50, 50), (25, 255, 255)),      # Orange - lower S,V for distant
-            ((25, 50, 80), (50, 255, 255)),     # Yellow - extended range
-            ((40, 40, 60), (100, 255, 255)),    # Green - extended range
-        ]
-
-        def count_hivis_pixels(img_region, ranges):
-            """Count hi-vis pixels in an image region"""
-            if img_region.size == 0:
-                return 0
-            hsv = cv2.cvtColor(img_region, cv2.COLOR_BGR2HSV)
-            count = 0
-            for lower, upper in ranges:
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        hivis_pixels = 0
+        for name in colors:
+            for lower, upper in self.HIVIS_COLOR_RANGES.get(name, []):
                 mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
-                count += cv2.countNonZero(mask)
-            return count
+                hivis_pixels += cv2.countNonZero(mask)
 
-        # Choose color ranges based on distance
-        color_ranges = hi_vis_ranges_relaxed if is_distant else hi_vis_ranges
-
-        # Strategy 1: Check full ROI (for closed vests)
-        hivis_full = count_hivis_pixels(roi, color_ranges)
-        full_ratio = hivis_full / total_pixels
-
-        # Strategy 2: Check lateral strips (for OPEN vests - color visible on sides)
-        # Analyze left 25% and right 25% of the ROI
-        strip_width = max(1, roi_w // 4)
-        left_strip = roi[:, :strip_width]
-        right_strip = roi[:, -strip_width:]
-
-        lateral_pixels = left_strip.shape[0] * left_strip.shape[1] * 2
-        hivis_lateral = count_hivis_pixels(left_strip, color_ranges) + count_hivis_pixels(right_strip, color_ranges)
-        lateral_ratio = hivis_lateral / lateral_pixels if lateral_pixels > 0 else 0
-
-        # Strategy 3: Check CENTER vertical strip (for distant persons)
-        # The torso/vest should be in the center, background on edges
-        center_margin = max(1, roi_w // 4)  # Skip 25% on each side
-        center_strip = roi[:, center_margin:-center_margin] if roi_w > center_margin * 2 else roi
-        center_pixels = center_strip.shape[0] * center_strip.shape[1] if center_strip.size > 0 else 1
-        hivis_center = count_hivis_pixels(center_strip, color_ranges)
-        center_ratio = hivis_center / center_pixels
-
-        # Debug logging
-        distance_label = "DISTANT" if is_distant else "CLOSE"
-        logger.debug(f"[{self.camera_name}] ColorCheck [{distance_label}] ROI: {roi_w}x{roi_h}, "
-                    f"Full: {full_ratio:.1%}, Lateral: {lateral_ratio:.1%}, Center: {center_ratio:.1%}")
-
-        # Thresholds adjusted for distance
-        full_threshold = threshold * 0.5 if is_distant else threshold  # 4% for distant, 8% for close
-        lateral_threshold = 0.10 if is_distant else 0.15  # 10% for distant, 15% for close
-        center_threshold = 0.05 if is_distant else 0.10   # 5% for distant, 10% for close
-
-        if full_ratio >= full_threshold:
-            logger.info(f"[{self.camera_name}] Color override [{distance_label}]: full ROI {full_ratio:.1%} >= {full_threshold:.1%}")
+        ratio = hivis_pixels / total_pixels
+        if ratio >= threshold:
+            logger.info(
+                f"[{self.camera_name}] Color override: {ratio:.1%} hi-vis "
+                f"in ROI {x2 - x1}x{y2 - y1} >= {threshold:.0%}"
+            )
             return True
-
-        if lateral_ratio >= lateral_threshold:
-            logger.info(f"[{self.camera_name}] Color override [{distance_label}]: lateral {lateral_ratio:.1%} >= {lateral_threshold:.1%}")
-            return True
-
-        if center_ratio >= center_threshold:
-            logger.info(f"[{self.camera_name}] Color override [{distance_label}]: center {center_ratio:.1%} >= {center_threshold:.1%}")
-            return True
-
-        logger.debug(f"[{self.camera_name}] No color override [{distance_label}] - full: {full_ratio:.1%}, lateral: {lateral_ratio:.1%}, center: {center_ratio:.1%}")
+        logger.debug(
+            f"[{self.camera_name}] No color override: {ratio:.1%} hi-vis "
+            f"in ROI {x2 - x1}x{y2 - y1} < {threshold:.0%}"
+        )
         return False
 
     def _process_ppe_mode(self, frame, boxes):
-        """Process frame in PPE detection mode
+        """Process frame in PPE detection mode.
 
-        Supports two model types:
-        1. Models with explicit no_vest/novest class (e.g., helmet_vest.pt)
-        2. Models with only vest class (e.g., workspace_safety.pt) - uses person/vest overlap logic
+        Decision logic lives in services/ppe_logic.py (pure, unit-tested):
+          * violation boxes must be associated with a detected person;
+          * persons too small in frame are not judged for PPE;
+          * per-class confidence thresholds (violations need >= 0.80);
+          * N-of-M temporal voting before any alert.
         """
-        # Count persons and PPE violations
-        person_count = 0
-        ppe_violations = []
-
         require_helmet = self.detection_config.get('ppe_require_helmet', True)
         require_vest = self.detection_config.get('ppe_require_vest', True)
+        class_confidence = self._class_confidence()
 
+        # The per-camera preset's ppe_confidence can only make violation
+        # verdicts STRICTER than the global per-class thresholds.
+        try:
+            preset_conf = float(self.detection_config.get('ppe_confidence') or 0.0)
+        except (TypeError, ValueError):
+            preset_conf = 0.0
+        for cls in ('novest', 'nohat'):
+            class_confidence[cls] = max(class_confidence.get(cls, 0.80), preset_conf)
+
+        # Canonicalize raw model detections.
+        detections = []
         if boxes is not None and len(boxes) > 0:
-            # Group detections by type
-            persons = []      # person detections with bounding box coords
-            helmets = []
-            vests = []
-            no_helmets = []
-            no_vests = []
-
-            # Classes to ignore (not relevant for vest/helmet PPE detection)
-            ignored_classes = {
-                'machinery', 'vehicle', 'safety cone',  # construction_safety.pt
-                'mask', 'no-mask',  # construction_safety.pt
-                'ear', 'ear-mufs', 'face', 'face-guard', 'face-mask',  # sh17 - body parts/other PPE
-                'foot', 'hands', 'head', 'tool', 'glasses', 'gloves',  # sh17 - body parts/other PPE
-                'shoes', 'safety-suit', 'medical-suit'  # sh17 - other PPE
-            }
-
-            # Diagnostic: log all detected classes
-            all_detections = []
             for box in boxes:
-                cls_id = int(box.cls[0])
-                cls_name = self.model.names[cls_id].lower()
-                conf = float(box.conf[0])
-
-                # Skip ignored classes
-                if cls_name in ignored_classes:
+                raw_name = self.model.names[int(box.cls[0])]
+                canon = ppe_logic.canonical_class(raw_name)
+                if canon is None:
                     continue
+                detections.append({
+                    'cls_name': canon,
+                    'conf': float(box.conf[0]),
+                    'xyxy': box.xyxy[0].cpu().numpy(),
+                })
 
-                xyxy = box.xyxy[0].cpu().numpy()  # Get bounding box coordinates
+        # Colour override: a CONFIDENT novest on someone visibly wearing
+        # fluorescent hi-vis is reclassified as vest. Strict thresholds —
+        # see _has_hivis_color.
+        override_cfg = self.config.get('vestColorOverride', {})
+        if isinstance(override_cfg, dict) and override_cfg.get('enabled', True):
+            try:
+                override_threshold = float(override_cfg.get('threshold', 0.20))
+            except (TypeError, ValueError):
+                override_threshold = 0.20
+            override_colors = override_cfg.get('colors')
+            novest_conf = class_confidence.get('novest', 0.80)
+            for det in detections:
+                if det['cls_name'] == 'novest' and det['conf'] >= novest_conf:
+                    if self._has_hivis_color(frame, det['xyxy'],
+                                             threshold=override_threshold,
+                                             colors=override_colors):
+                        det['cls_name'] = 'vest'
+                        det['color_override'] = True
+                        logger.info(f"[{self.camera_name}] Color override: novest→vest")
 
-                box_data = {
-                    'box': box,
-                    'conf': conf,
-                    'xyxy': xyxy,  # [x1, y1, x2, y2]
-                    'cls_name': cls_name
-                }
-                all_detections.append(f"{cls_name}:{conf:.1%}")
+        result = ppe_logic.evaluate_ppe(
+            detections,
+            frame.shape[0],
+            class_confidence=class_confidence,
+            min_person_height_ratio=self._cfg_float('minPersonHeightRatio', 0.06),
+            require_helmet=require_helmet,
+            require_vest=require_vest,
+            model_class_names=list(self.model.names.values()),
+        )
 
-                if cls_name == 'person':
-                    persons.append(box_data)
-                elif 'helmet' in cls_name or 'hat' in cls_name:
-                    if 'no' in cls_name:
-                        no_helmets.append(box_data)
-                    else:
-                        helmets.append(box_data)
-                elif 'vest' in cls_name:
-                    if 'no' in cls_name:
-                        # COLOR OVERRIDE: Check if hi-vis color is present despite 'novest' detection
-                        vest_color_override = self.config.get('vestColorOverride', {})
-                        if vest_color_override.get('enabled', True):
-                            threshold = vest_color_override.get('threshold', 0.15)
-                            if self._has_hivis_color(frame, xyxy, threshold=threshold):
-                                # Hi-vis color detected - override novest, consider vest as present
-                                # Change cls_name to 'vest' so annotation shows green box
-                                box_data['cls_name'] = 'vest'
-                                box_data['color_override'] = True  # Flag for logging
-                                vests.append(box_data)
-                                logger.info(f"[{self.camera_name}] Color override: novest→vest (hi-vis detected in ROI)")
-                            else:
-                                no_vests.append(box_data)
-                        else:
-                            no_vests.append(box_data)
-                    else:
-                        vests.append(box_data)
+        db.update_camera_detection(self.camera_id, result['person_count'])
 
-            person_count = len(persons)
+        if detections:
+            summary = ', '.join(f"{d['cls_name']}:{d['conf']:.1%}" for d in detections)
+            logger.info(
+                f"[{self.camera_name}] PPE detections: {summary} | "
+                f"persons={result['person_count']} eligible={result['eligible_count']} "
+                f"violations={sorted(result['violations'])} "
+                f"ignored_bg={result['ignored_violations']}"
+            )
 
-            # Log all detections for diagnostics
-            if all_detections:
-                logger.info(f"[{self.camera_name}] PPE detections: {', '.join(all_detections)} | persons={len(persons)} helmets={len(helmets)} vests={len(vests)} no_helmets={len(no_helmets)} no_vests={len(no_vests)}")
+        # Keep the most recent frame that actually SHOWED a violation, so an
+        # alert confirmed on a later (clean) frame still ships real evidence.
+        if result['violations']:
+            self._violation_evidence = (frame.copy(), result['boxes'],
+                                        set(result['violations']))
 
-            # Check for PPE violations
-            # Determine if model has explicit "no" classes (like NO-Safety Vest, NO-Hardhat)
-            model_classes_lower = [name.lower() for name in self.model.names.values()]
-            has_explicit_no_vest = any('no' in c and 'vest' in c for c in model_classes_lower)
-            has_explicit_no_helmet = any('no' in c and ('helmet' in c or 'hat' in c) for c in model_classes_lower)
+        # Temporal N-of-M vote: only violations that persist across several
+        # analyzed frames may alert.
+        confirmed = self._temporal.update(result['violations'])
+        if not confirmed:
+            return
 
-            # Helmet: use no_helmet detections directly
-            if require_helmet and len(no_helmets) > 0:
-                ppe_violations.append('helmet_missing')
+        # Re-alert pacing: one alert per violation type per realert window,
+        # so a persistent violation reminds instead of flooding.
+        now = time.time()
+        realert_seconds = self._cfg_float('alertRealertSeconds', 120)
+        due = sorted(
+            t for t in confirmed
+            if now - self._last_type_alert.get(t, 0.0) >= realert_seconds
+        )
+        if not due:
+            return
 
-            # Vest: different logic based on model type
-            if require_vest:
-                if len(no_vests) > 0:
-                    # Explicit NO-Safety Vest detected - definitely a violation
-                    ppe_violations.append('vest_missing')
-                elif not has_explicit_no_vest:
-                    # Model doesn't have NO-Vest class, use fallback overlap logic
-                    if len(persons) > 0 and len(vests) == 0:
-                        # No vests detected at all - violation
-                        ppe_violations.append('vest_missing')
-                    elif len(persons) > 0 and len(vests) > 0:
-                        # Check if each person has a vest (using bounding box overlap)
-                        persons_without_vest = self._count_persons_without_vest(persons, vests)
-                        if persons_without_vest > 0:
-                            ppe_violations.append('vest_missing')
-                # If model HAS explicit NO-Vest class but none detected, no violation
+        # Evidence selection: if the confirming frame does not itself show
+        # any due violation, fall back to the stored violating frame.
+        alert_frame, alert_boxes = frame, result['boxes']
+        if not (set(due) & result['violations']) and self._violation_evidence:
+            ev_frame, ev_boxes, ev_types = self._violation_evidence
+            if set(due) & ev_types:
+                alert_frame, alert_boxes = ev_frame, ev_boxes
 
-        # Update database
-        db.update_camera_detection(self.camera_id, person_count)
-
-        # Trigger alert only if PPE violations detected
-        if ppe_violations:
-            alert_cooldown = self.detection_config.get('cooldown_seconds', 5)
-            # Combine all processed boxes for annotation (with corrected cls_name after color override)
-            processed_boxes = persons + helmets + no_helmets + vests + no_vests
-            self._trigger_alert(frame, boxes, person_count, 'ppe_violation', alert_cooldown, ppe_violations, processed_boxes)
+        alert_cooldown = self.detection_config.get('cooldown_seconds', 5)
+        fired = self._trigger_alert(
+            alert_frame, None, result['person_count'], 'ppe_violation',
+            alert_cooldown, due, alert_boxes
+        )
+        if fired:
+            for t in due:
+                self._last_type_alert[t] = now
 
     def _trigger_alert(self, frame, boxes, person_count, alert_type, cooldown, violations=None, processed_boxes=None):
-        """Trigger alert if cooldown period has passed"""
+        """Trigger alert if cooldown period has passed. Returns True if fired."""
         current_time = time.time()
 
         if current_time - self.last_alert_time < cooldown:
-            return
+            return False
 
         self.last_alert_time = current_time
 
-        # Calculate confidence
-        confidences = boxes.conf.cpu().numpy() if boxes is not None else []
+        # Calculate confidence over the boxes that matter (persons + PPE),
+        # not over raw model output (which includes irrelevant classes).
+        if processed_boxes:
+            confidences = [b.get('conf', 0.0) for b in processed_boxes]
+        else:
+            confidences = boxes.conf.cpu().numpy() if boxes is not None else []
         avg_conf = float(np.mean(confidences)) if len(confidences) > 0 else 0.0
 
         # Save detection
@@ -602,18 +623,31 @@ class CameraWorker:
         # Send to external systems (NxWitness, EVLOS)
         # Use cropped image for EVLOS if available, otherwise use annotated
         evlos_image_path = cropped_path if cropped_path else annotated_path
-        self._send_external_alerts(boxes, person_count, avg_conf, evlos_image_path, alert_type)
+        self._send_external_alerts(boxes, person_count, avg_conf, evlos_image_path,
+                                   alert_type, processed_boxes)
+        return True
 
-    def _send_external_alerts(self, boxes, person_count, avg_conf, annotated_path, alert_type):
+    def _send_external_alerts(self, boxes, person_count, avg_conf, annotated_path,
+                              alert_type, processed_boxes=None):
         """Send alerts to external systems (NxWitness, EVLOS)"""
         # Send alert to NxWitness if enabled
         nx_alerts_config = self.config.get("nxWitnessAlerts", {})
         if nx_alerts_config.get("enabled", False):
             logger.info(f"[{self.camera_name}] NxWitness alerts enabled, sending HTTP alert...")
             try:
-                # Prepare bounding boxes data
+                # Prepare bounding boxes data. Prefer the processed boxes
+                # (per-class filtered, colour-override corrected) over raw
+                # model output, which includes sub-threshold noise.
                 boxes_data = []
-                if boxes is not None and len(boxes) > 0:
+                if processed_boxes:
+                    for b in processed_boxes:
+                        x1, y1, x2, y2 = map(float, b['xyxy'])
+                        boxes_data.append({
+                            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                            "confidence": float(b.get('conf', 0.0)),
+                            "class": b.get('cls_name', 'unknown')
+                        })
+                elif boxes is not None and len(boxes) > 0:
                     for box in boxes:
                         x1, y1, x2, y2 = map(float, box.xyxy[0].cpu().numpy())
                         boxes_data.append({
@@ -702,6 +736,17 @@ class CameraWorker:
         alerts_dir = Path(__file__).parent.parent / "data" / "static" / "alerts"
         alerts_dir.mkdir(parents=True, exist_ok=True)
 
+        # Cap the evidence resolution: frames are native-res now (no more
+        # 640x480 pre-resize) and 3 JPEGs are written per alert. 1920 wide
+        # keeps them readable without bloating disk/EVLOS uploads.
+        # Boxes are scaled accordingly.
+        max_width = 1920
+        frame_h, frame_w = frame.shape[:2]
+        scale = 1.0
+        if frame_w > max_width:
+            scale = max_width / frame_w
+            frame = cv2.resize(frame, (max_width, int(frame_h * scale)))
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         camera_safe_name = self.camera_name.replace(' ', '_').replace('/', '_')
 
@@ -710,14 +755,34 @@ class CameraWorker:
         full_path = alerts_dir / full_filename
         cv2.imwrite(str(full_path), frame)
 
-        # Save annotated image with face blur applied
+        # Save annotated image
         annotated_path = None
         cropped_path = None
-        if boxes is not None and len(boxes) > 0:
-            # Calculate bounding box that contains all detections
+
+        # Use processed_boxes if available (per-class filtered, corrected
+        # cls_name after colour override) — both for the crop region and the
+        # annotations. Raw output includes sub-threshold noise that would
+        # stretch the crop to irrelevant regions.
+        if processed_boxes:
+            boxes_to_draw = processed_boxes
+        elif boxes is not None and len(boxes) > 0:
+            boxes_to_draw = [
+                {
+                    'xyxy': box.xyxy[0].cpu().numpy(),
+                    'conf': float(box.conf[0]),
+                    'cls_name': self.model.names[int(box.cls[0])]
+                }
+                for box in boxes
+            ]
+        else:
+            boxes_to_draw = []
+
+        if boxes_to_draw:
+            # Calculate bounding box that contains all drawn detections
+            # (coordinates scaled to the possibly-downscaled evidence frame)
             all_x1, all_y1, all_x2, all_y2 = [], [], [], []
-            for box in boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+            for box_data in boxes_to_draw:
+                x1, y1, x2, y2 = (int(v * scale) for v in box_data['xyxy'])
                 all_x1.append(x1)
                 all_y1.append(y1)
                 all_x2.append(x2)
@@ -790,25 +855,11 @@ class CameraWorker:
                 'vehicle': (255, 165, 0),
             }
 
-            # Use processed_boxes if available (has corrected cls_name after color override)
-            # Otherwise fall back to YOLO boxes
-            if processed_boxes:
-                boxes_to_draw = processed_boxes
-            else:
-                boxes_to_draw = [
-                    {
-                        'xyxy': box.xyxy[0].cpu().numpy(),
-                        'conf': float(box.conf[0]),
-                        'cls_name': self.model.names[int(box.cls[0])]
-                    }
-                    for box in boxes
-                ]
-
             for box_data in boxes_to_draw:
                 xyxy = box_data.get('xyxy')
                 if xyxy is None:
                     continue
-                x1, y1, x2, y2 = map(int, xyxy)
+                x1, y1, x2, y2 = (int(v * scale) for v in xyxy)
                 conf = box_data.get('conf', 0.0)
                 cls_name = box_data.get('cls_name', 'unknown')
 
@@ -818,8 +869,9 @@ class CameraWorker:
                 # Draw rectangle with thickness=2
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
 
-                # Draw label with matching color
-                label = f"{cls_name} {conf:.2f}"
+                # Draw label with matching color ('*' marks a colour override)
+                override_mark = '*' if box_data.get('color_override') else ''
+                label = f"{cls_name}{override_mark} {conf:.2f}"
                 label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
 
                 # Position label based on class type to avoid overlap
@@ -1059,6 +1111,12 @@ class VideoWorkerManager:
 
             for camera_id, worker in self.workers.items():
                 worker.config = self.config
+                # Rebuild the temporal filter if its parameters changed
+                # (resets the voting window, which is fine on a config change).
+                new_temporal = worker._build_temporal_filter()
+                if (new_temporal.window != worker._temporal.window
+                        or new_temporal.min_hits != worker._temporal.min_hits):
+                    worker._temporal = new_temporal
                 # Reload detection_config from database (for non-confidence settings like detection_mode)
                 new_detection_config = db.get_camera_detection_config(camera_id)
                 if new_detection_config:

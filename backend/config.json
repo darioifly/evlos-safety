@@ -2,6 +2,19 @@
   "model": "models/ppe/helmet_vest.pt",
   "modelType": "ppe",
   "confidence": 0.75,
+  "classConfidence": {
+    "person": 0.5,
+    "vest": 0.45,
+    "hat": 0.45,
+    "novest": 0.8,
+    "nohat": 0.7
+  },
+  "inferenceSize": 1280,
+  "minPersonHeightRatio": 0.06,
+  "temporalWindow": 5,
+  "temporalMinHits": 3,
+  "temporalMaxAgeSeconds": 90,
+  "alertRealertSeconds": 120,
   "device": "cuda:0",
   "minPersons": 1,
   "cooldown": 5,
@@ -22,9 +35,9 @@
   },
   "vestColorOverride": {
     "enabled": true,
-    "threshold": 0.08,
-    "colors": ["red", "orange", "yellow", "green"],
-    "description": "Override false 'novest' detections when hi-vis color is present in ROI (8% for open vests)"
+    "threshold": 0.2,
+    "colors": ["orange", "yellow", "green"],
+    "description": "Override false 'novest' when >=20% of the box is FLUORESCENT hi-vis (strict ranges, no ROI expansion)"
   },
   "distanceThresholds": {
     "veryFarThreshold": 0.05,
