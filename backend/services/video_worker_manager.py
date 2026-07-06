@@ -58,12 +58,13 @@ def _extract_jpeg(buffer: bytes):
 class CameraWorker:
     """Worker thread for a single camera"""
 
-    def __init__(self, camera_id: str, camera_name: str, model, config: dict, model_lock=None):
+    def __init__(self, camera_id: str, camera_name: str, model, config: dict, model_lock=None, face_blurrer=None):
         self.camera_id = camera_id
         self.camera_name = camera_name
         self.model = model
         self.config = config
         self.model_lock = model_lock  # Lock for thread-safe CUDA inference
+        self.face_blurrer = face_blurrer  # Shared FaceBlurrer (or None)
         self.thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self.last_alert_time = 0
@@ -746,11 +747,33 @@ class CameraWorker:
         if frame_w > max_width:
             scale = max_width / frame_w
             frame = cv2.resize(frame, (max_width, int(frame_h * scale)))
+        else:
+            # Never mutate the caller's frame in place (evidence frame reuse).
+            frame = frame.copy()
+
+        # Face-only anonymization: pixelate detected faces BEFORE any image
+        # is written, so full / annotated / cropped all inherit it. Only the
+        # face is obscured — helmet, vest and body stay visible. Runs on a
+        # copy; the detection frame is untouched.
+        face_cfg = self.config.get('faceBlur', {})
+        if self.face_blurrer is not None and (not isinstance(face_cfg, dict)
+                                              or face_cfg.get('enabled', True)):
+            try:
+                person_boxes = [
+                    [c * scale for c in b['xyxy']]
+                    for b in (processed_boxes or [])
+                    if b.get('cls_name') == 'person'
+                ]
+                n_faces = self.face_blurrer.blur_faces(frame, person_boxes=person_boxes)
+                if n_faces:
+                    logger.info(f"[{self.camera_name}] Face blur: {n_faces} face(s) obscured")
+            except Exception as e:
+                logger.warning(f"[{self.camera_name}] Face blur failed: {e}")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         camera_safe_name = self.camera_name.replace(' ', '_').replace('/', '_')
 
-        # Save full frame (original, no blur)
+        # Save full frame (faces blurred, no annotation boxes)
         full_filename = f"{camera_safe_name}_{timestamp}_full.jpg"
         full_path = alerts_dir / full_filename
         cv2.imwrite(str(full_path), frame)
@@ -937,6 +960,7 @@ class VideoWorkerManager:
         self.config = {}
         self._initialized = False
         self.model_lock = threading.Lock()  # Lock for thread-safe CUDA inference
+        self.face_blurrer = None  # Shared FaceBlurrer for alert-screenshot anonymization
 
     def initialize(self):
         """Initialize YOLO model and load config"""
@@ -985,6 +1009,19 @@ class VideoWorkerManager:
         logger.info(f"YOLO model loaded on {device}")
         logger.info(f"Model classes: {list(self.model.names.values())}")
 
+        # Initialize the shared face blurrer for alert-screenshot privacy.
+        face_cfg = self.config.get('faceBlur', {})
+        if not isinstance(face_cfg, dict) or face_cfg.get('enabled', True):
+            from services.face_blur import FaceBlurrer
+            self.face_blurrer = FaceBlurrer(
+                model_path=face_cfg.get('modelPath') if isinstance(face_cfg, dict) else None,
+                score_threshold=float(face_cfg.get('scoreThreshold', 0.6)) if isinstance(face_cfg, dict) else 0.6,
+                blocks=int(face_cfg.get('blocks', 10)) if isinstance(face_cfg, dict) else 10,
+                expand=float(face_cfg.get('expand', 0.15)) if isinstance(face_cfg, dict) else 0.15,
+            )
+        else:
+            logger.info("Face blur disabled by config")
+
         self._initialized = True
         logger.info("Video Worker Manager initialized")
 
@@ -997,7 +1034,8 @@ class VideoWorkerManager:
     def _start_worker_for_camera(self, camera_id: str, camera_name: str) -> CameraWorker:
         """Build and start one CameraWorker. Registers it under self.workers.
         Does NOT touch db.set_camera_enabled — callers handle persistence."""
-        worker = CameraWorker(camera_id, camera_name, self.model, self.config, self.model_lock)
+        worker = CameraWorker(camera_id, camera_name, self.model, self.config,
+                              self.model_lock, getattr(self, 'face_blurrer', None))
         self.workers[camera_id] = worker
         worker.start()
         return worker

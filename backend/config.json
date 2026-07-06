@@ -39,6 +39,13 @@
     "colors": ["orange", "yellow", "green"],
     "description": "Override false 'novest' when >=20% of the box is FLUORESCENT hi-vis (strict ranges, no ROI expansion)"
   },
+  "faceBlur": {
+    "enabled": true,
+    "scoreThreshold": 0.6,
+    "blocks": 10,
+    "expand": 0.15,
+    "description": "Pixelate ONLY detected faces (YuNet) in saved alert screenshots; helmet/vest/body stay visible. Toggle 'enabled' hot; scoreThreshold/blocks need a restart"
+  },
   "distanceThresholds": {
     "veryFarThreshold": 0.05,
     "farThreshold": 0.15,
