@@ -22,9 +22,11 @@ Design goals (fixes for the false-alert problems observed in production):
   * Per-class confidence thresholds: violation classes need much stronger
     evidence (default 0.80) than compliance classes (default 0.45), because
     a false violation costs an alarm while a false compliance only delays it.
-  * Vest-veto: if a person ALSO has an associated vest detection, novest
-    boxes on that person are suppressed (YOLO NMS is per-class, so both can
-    coexist on one torso; the tie goes to compliance).
+  * Vest-veto: a novest box is suppressed only when a vest box overlaps IT
+    substantially (same torso — YOLO NMS is per-class, so both can coexist
+    on one body; the tie goes to compliance). Owner-level vetoing proved
+    wrong on real footage: in group scenes the compliant colleague's vest
+    associated to the violator's person box and silenced true violations.
   * Temporal N-of-M voting (TemporalViolationFilter): a violation must be
     seen in at least N of the last M analyzed frames — AND those votes must
     be recent (time-based expiry) — before it can alert.
@@ -70,6 +72,10 @@ DEFAULT_MIN_PERSON_HEIGHT_RATIO = 0.06
 # attach to nearby workers).
 ASSOCIATION_IOU = 0.25
 ASSOCIATION_TOP_EXPAND = 0.15
+
+# A compliance box (vest/hat) vetoes a violation box (novest/nohat) only
+# when the two boxes cover the SAME body part.
+SAME_TORSO_IOU = 0.45
 
 
 def canonical_class(cls_name):
@@ -217,6 +223,8 @@ def evaluate_ppe(detections, frame_height, *,
             violation_items.append((item, owners))
 
     # Pass 2 — judge violation items now that worn items are known.
+    vest_boxes = [d['xyxy'] for d in items if d['cls_name'] == 'vest']
+    hat_boxes = [d['xyxy'] for d in items if d['cls_name'] == 'hat']
     violations = set()
     ignored_violations = 0
     for item, owners in violation_items:
@@ -226,16 +234,16 @@ def evaluate_ppe(detections, frame_height, *,
             ignored_violations += 1
             continue
         if item['cls_name'] == 'novest':
-            # Vest-veto: if every eligible owner also has an associated
-            # vest, the tie goes to compliance (NMS is per-class; both
-            # boxes routinely coexist on one torso).
-            if all('vest' in p.get('items', set()) for p in eligible_owners):
+            # Vest-veto: only a vest box on the SAME torso (high overlap
+            # with the novest box itself) suppresses the violation. The
+            # colleague's vest on an overlapping person box must not.
+            if any(iou(item['xyxy'], vb) >= SAME_TORSO_IOU for vb in vest_boxes):
                 item['vetoed_by_vest'] = True
                 continue
             if require_vest:
                 violations.add('vest_missing')
         elif item['cls_name'] == 'nohat':
-            if all('hat' in p.get('items', set()) for p in eligible_owners):
+            if any(iou(item['xyxy'], hb) >= SAME_TORSO_IOU for hb in hat_boxes):
                 item['vetoed_by_hat'] = True
                 continue
             if require_helmet:

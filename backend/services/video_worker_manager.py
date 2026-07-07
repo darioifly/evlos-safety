@@ -504,10 +504,12 @@ class CameraWorker:
                 })
 
         # Colour override: a CONFIDENT novest on someone visibly wearing
-        # fluorescent hi-vis is reclassified as vest. Strict thresholds —
-        # see _has_hivis_color.
+        # fluorescent hi-vis is reclassified as vest. DISABLED by default:
+        # on real footage (backtest 07/07/2026, blind-judged) every strict
+        # override killed a TRUE violation — orange shirts / hi-vis of
+        # bystanders inside the novest box fool any colour statistic.
         override_cfg = self.config.get('vestColorOverride', {})
-        if isinstance(override_cfg, dict) and override_cfg.get('enabled', True):
+        if isinstance(override_cfg, dict) and override_cfg.get('enabled', False):
             try:
                 override_threshold = float(override_cfg.get('threshold', 0.20))
             except (TypeError, ValueError):

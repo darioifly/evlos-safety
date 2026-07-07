@@ -6,7 +6,7 @@
     "person": 0.5,
     "vest": 0.45,
     "hat": 0.45,
-    "novest": 0.8,
+    "novest": 0.75,
     "nohat": 0.7
   },
   "inferenceSize": 1280,
@@ -34,10 +34,10 @@
     "alwaysAlertOnPerson": true
   },
   "vestColorOverride": {
-    "enabled": true,
+    "enabled": false,
     "threshold": 0.2,
     "colors": ["orange", "yellow", "green"],
-    "description": "Override false 'novest' when >=20% of the box is FLUORESCENT hi-vis (strict ranges, no ROI expansion)"
+    "description": "DISABILITATO 07/07/2026: nel backtest giudicato alla cieca ogni override sopprimeva una violazione VERA (magliette arancioni/hi-vis di terzi dentro il box novest)"
   },
   "faceBlur": {
     "enabled": true,

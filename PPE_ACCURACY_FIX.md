@@ -85,6 +85,38 @@ al tempo stesso sopprimeva violazioni reali:
 "vestColorOverride": {"enabled":true, "threshold":0.2, "colors":["orange","yellow","green"]}
 ```
 
+## Backtest sui 1.746 alert storici + giudizio visivo cieco (07/07/2026)
+
+Replay dell'intero archivio alert (15/05–11/06 = vecchio codice, 06–07/07 =
+nuovo codice) con la nuova pipeline (`backtest.py`), più 73 campioni
+stratificati giudicati alla cieca da 2 agenti indipendenti (accordo 95%).
+Trovato e corretto con i DATI:
+
+1. **Override colore → DISABILITATO di default**: 8/8 soppressioni da
+   override erano violazioni VERE (magliette arancioni/hi-vis di terzi
+   dentro il box novest ingannano qualunque statistica di colore).
+2. **Vest-veto → regola stesso-torso** (IoU ≥ 0.45 tra box novest e box
+   vest): il veto a livello di "proprietario" uccideva 4/4 violazioni vere
+   nelle scene di gruppo (il gilet del collega associava anche al violatore).
+3. **novest 0.80 → 0.75**: la banda 0.75–0.80 era all'~92% violazioni vere;
+   il flicker resta filtrato dal voto 3-di-5.
+
+Risultato finale sul corpus storico (solo frame diurni, vecchio codice):
+- ritenzione **per episodio** (cluster ≤10 min): **75%** (177/236); persi 9
+  episodi multi-frame + 50 blip da singolo frame (che il filtro temporale
+  sopprimerebbe comunque).
+- precisione degli alert mantenuti (campione giudicato): **~92%**.
+- 17% dei vecchi alert era notturno → ora gestito come intrusion (corretto:
+  i campioni notturni mostrano pattuglie/persone in cantiere di notte).
+- Gli alert del NUOVO codice live (06–07/07) giudicati: **11/12 violazioni
+  vere.**
+
+**Nota operativa**: il grosso del "flood" storico erano violazioni REALI
+ricorrenti nelle zone uffici/ingresso (Sessa 2, Dragoni), ri-allertate ogni
+4 s dal vecchio codice. Ora il pacing è 1 alert/120 s per violazione
+persistente. Se quelle zone non richiedono DPI, la soluzione è una maschera
+di zona per-camera (feature futura), non alzare le soglie.
+
 ## Trade-off dichiarati (review avversariale multi-agente, 16 agenti)
 - **Camera larga (Velletri)**: persone < 6% dell'altezza frame NON vengono
   giudicate per i DPI (a quella distanza il verdetto del modello è rumore —

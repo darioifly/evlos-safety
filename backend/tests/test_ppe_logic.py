@@ -216,9 +216,9 @@ def test_personless_model_respects_rule_flags():
 
 # ------------------------------------------------------------ vest-veto
 
-def test_vest_veto_suppresses_coexisting_novest():
-    """NMS is per-class: vest and novest can coexist on one torso.
-    The tie goes to compliance."""
+def test_vest_veto_suppresses_same_torso_novest():
+    """NMS is per-class: vest and novest can coexist on ONE torso (boxes
+    nearly coincide). The tie goes to compliance."""
     result = evaluate([
         person(),
         det('vest', 0.60, 120, 180, 180, 280),
@@ -232,7 +232,21 @@ def test_novest_without_coexisting_vest_still_alerts():
     assert result['violations'] == {'vest_missing'}
 
 
-def test_hat_veto_suppresses_coexisting_nohat():
+def test_colleagues_vest_does_not_veto_violators_novest():
+    """Group scene: compliant colleague's vest box must NOT silence the
+    violator's novest, even when their person boxes overlap (this killed
+    4/4 true violations in the blind-judged backtest)."""
+    violator = det('person', 0.9, 100, 100, 200, 400)
+    colleague = det('person', 0.9, 180, 100, 280, 400)  # overlapping boxes
+    result = evaluate([
+        violator, colleague,
+        det('novest', 0.82, 120, 180, 180, 280),   # violator's torso
+        det('vest', 0.85, 200, 180, 260, 280),     # colleague's torso
+    ])
+    assert result['violations'] == {'vest_missing'}
+
+
+def test_hat_veto_suppresses_same_head_nohat():
     result = evaluate([
         person(),
         det('hat', 0.60, 130, 90, 170, 130),
