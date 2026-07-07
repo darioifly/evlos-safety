@@ -482,6 +482,46 @@ class NxWitnessClient:
             logger.error(f"Error creating bookmark for {camera_id}: {e}")
             return False
 
+    # ------------------------------------------------------------- PTZ
+    # Legacy /api/ptz endpoint (verified live on the deployed server:
+    # works over http with Basic auth; ActivatePresetPtzCommand moves the
+    # camera and GetActiveObject reflects our activation).
+
+    def _ptz_command(self, camera_id: str, command: str, **extra) -> Optional[Dict]:
+        """POST a legacy PTZ command; returns the parsed JSON or None."""
+        try:
+            payload = {"cameraId": camera_id, "command": command}
+            payload.update(extra)
+            response = requests.post(
+                f"{self.server_url}/api/ptz",
+                json=payload,
+                headers=self._get_headers(),
+                timeout=10,
+                verify=False,
+            )
+            if response.status_code != 200:
+                logger.warning(f"PTZ {command} on {camera_id}: HTTP {response.status_code}")
+                return None
+            data = response.json()
+            if data.get('error') not in ('0', 0, None):
+                logger.warning(f"PTZ {command} on {camera_id}: {data.get('errorString')}")
+                return None
+            return data
+        except Exception as e:
+            logger.warning(f"PTZ {command} on {camera_id} failed: {e}")
+            return None
+
+    def ptz_get_presets(self, camera_id: str) -> List[Dict]:
+        """Named PTZ presets of a camera: [{'id':..., 'name':...}, ...]."""
+        data = self._ptz_command(camera_id, "GetPresetsPtzCommand")
+        return data.get('reply', []) if data else []
+
+    def ptz_activate_preset(self, camera_id: str, preset_id: str, speed: float = 1.0) -> bool:
+        """Move the camera to a named preset. Returns True on success."""
+        data = self._ptz_command(camera_id, "ActivatePresetPtzCommand",
+                                 presetId=preset_id, speed=speed)
+        return data is not None
+
     def test_connection(self) -> bool:
         """Test connection to NxWitness server"""
         try:

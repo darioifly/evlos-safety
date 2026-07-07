@@ -55,6 +55,24 @@ def test_cfg_helpers_survive_bad_values():
     assert w._cfg_float('alertRealertSeconds', 120) == 120.0
 
 
+def test_realert_override_by_camera_name():
+    w = _build_worker(config={'alertRealertSeconds': 120,
+                              'realertOverrides': {'Cam 1': 600}})
+    assert w._realert_seconds() == 600.0
+
+
+def test_realert_fallback_to_global():
+    w = _build_worker(config={'alertRealertSeconds': 120,
+                              'realertOverrides': {'Altra Camera': 600}})
+    assert w._realert_seconds() == 120.0
+
+
+def test_realert_survives_bad_override_value():
+    w = _build_worker(config={'alertRealertSeconds': 120,
+                              'realertOverrides': {'Cam 1': 'boh'}})
+    assert w._realert_seconds() == 120.0
+
+
 def test_effective_mode_respects_dual_schedule():
     w = _build_worker(config={'detectionMode': 'dual',
                               'schedule': {'dayStartHour': 0, 'dayEndHour': 24}})

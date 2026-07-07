@@ -17,6 +17,7 @@ from utils.logger import logger
 from database import db
 from services import ppe_logic
 from services.nx_witness import nx_client
+from services.ptz_patrol import patrol
 from integrations.evlos_client import evlos_client
 
 
@@ -312,9 +313,33 @@ class CameraWorker:
             is_day = hour >= day_start or hour < day_end
         return 'ppe' if is_day else 'intrusion'
 
+    def _realert_seconds(self) -> float:
+        """Re-alert pacing: per-camera override (by name) over the global."""
+        overrides = self.config.get('realertOverrides', {})
+        if isinstance(overrides, dict):
+            value = overrides.get(self.camera_name)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    pass
+        return self._cfg_float('alertRealertSeconds', 120)
+
     def _process_frame(self, frame):
         """Process single frame with YOLO"""
+        # Scene-aware patrol (PTZ orchestrated by services/ptz_patrol):
+        # skip frames while the camera is moving between presets, and skip
+        # PPE verdicts on scenes tagged no-PPE (parking, offices...). The
+        # dual schedule still applies: at night those scenes run intrusion.
+        scene = patrol.get_scene(self.camera_id)
+        if scene and scene['in_transit']:
+            return
+
         detection_mode = self._effective_detection_mode()
+        if scene and scene['no_ppe'] and detection_mode == 'ppe':
+            # Scene where PPE is not required: nothing to check by day.
+            db.update_camera_detection(self.camera_id, 0)
+            return
 
         # Reset temporal voting when the effective mode flips (day/night):
         # votes from the previous shift must not combine with fresh noise.
@@ -561,7 +586,7 @@ class CameraWorker:
         # Re-alert pacing: one alert per violation type per realert window,
         # so a persistent violation reminds instead of flooding.
         now = time.time()
-        realert_seconds = self._cfg_float('alertRealertSeconds', 120)
+        realert_seconds = self._realert_seconds()
         due = sorted(
             t for t in confirmed
             if now - self._last_type_alert.get(t, 0.0) >= realert_seconds

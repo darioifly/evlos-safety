@@ -15,6 +15,33 @@
   "temporalMinHits": 3,
   "temporalMaxAgeSeconds": 90,
   "alertRealertSeconds": 120,
+  "realertOverrides": {
+    "Dragoni Carrello PTZ": 600,
+    "Grazzanise Carrello PTZ": 600
+  },
+  "ptzPatrol": {
+    "enabled": false,
+    "dwellSeconds": 60,
+    "settleSeconds": 6,
+    "noPpeNameTags": [
+      "esterno",
+      "parcheggio",
+      "uffici",
+      "no-ppe"
+    ],
+    "skipPresetNames": [
+      "Home"
+    ],
+    "cameras": {
+      "Dragoni Carrello PTZ": {
+        "enabled": true
+      },
+      "Grazzanise Carrello PTZ": {
+        "enabled": true
+      }
+    },
+    "description": "Patrol orchestrato: creare i preset NX con nomi parlanti sulle PTZ, DISATTIVARE il tour nativo delle camere, poi enabled:true. I preset con tag in noPpeNameTags non generano verdetti PPE di giorno."
+  },
   "device": "cuda:0",
   "minPersons": 1,
   "cooldown": 5,
@@ -36,7 +63,11 @@
   "vestColorOverride": {
     "enabled": false,
     "threshold": 0.2,
-    "colors": ["orange", "yellow", "green"],
+    "colors": [
+      "orange",
+      "yellow",
+      "green"
+    ],
     "description": "DISABILITATO 07/07/2026: nel backtest giudicato alla cieca ogni override sopprimeva una violazione VERA (magliette arancioni/hi-vis di terzi dentro il box novest)"
   },
   "faceBlur": {

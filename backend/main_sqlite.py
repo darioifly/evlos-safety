@@ -209,6 +209,14 @@ async def lifespan(app: FastAPI):
     worker_manager.initialize()
     logger.info("✓ Video worker manager ready")
 
+    # Scene-aware PTZ patrol (services/ptz_patrol): WE drive the named-preset
+    # rotation so the pipeline always knows which scene each PTZ is watching.
+    from services.ptz_patrol import patrol
+    from services.nx_witness import nx_client as shared_nx_client
+    patrol.nx = shared_nx_client
+    patrol.configure(worker_manager.config)
+    patrol.start()
+
     # Start background task for periodic cleanup
     cleanup_task = asyncio.create_task(periodic_cleanup())
 
@@ -234,6 +242,8 @@ async def lifespan(app: FastAPI):
     snapshot_task.cancel()
     evlos_drainer_task.cancel()
     supervisor_task.cancel()
+    from services.ptz_patrol import patrol as _patrol
+    _patrol.stop()
     if worker_manager:
         worker_manager.stop_all()
 
@@ -832,6 +842,12 @@ async def update_detection_config(config: dict):
         if worker_manager:
             worker_manager.reload_config()
 
+        # Reconfigure + restart the scene-aware PTZ patrol with the new config
+        from services.ptz_patrol import patrol
+        patrol.stop()
+        patrol.configure(worker_manager.config if worker_manager else config)
+        patrol.start()
+
         return {"status": "success", "message": "Configuration saved and applied to running workers."}
     except Exception as e:
         logger.error(f"Error saving config: {e}")
@@ -850,6 +866,13 @@ async def reload_preset_configs():
         return {"status": "success", "message": "Preset configurations reloaded for all workers."}
     else:
         return {"status": "error", "message": "Worker manager not initialized"}
+
+
+@app.get("/api/patrol/status")
+async def get_patrol_status():
+    """Scene-aware PTZ patrol: current scene per managed camera."""
+    from services.ptz_patrol import patrol
+    return patrol.status()
 
 
 @app.get("/api/system/memory")
