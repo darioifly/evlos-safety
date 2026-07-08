@@ -19,6 +19,7 @@ from services import ppe_logic
 from services.nx_witness import nx_client
 from services.ptz_patrol import patrol
 from integrations.evlos_client import evlos_client
+from integrations.vlm_verifier import vlm_verifier
 
 
 # F-002: MJPEG parsing hardening.
@@ -83,6 +84,9 @@ class CameraWorker:
         self._violation_evidence = None
         # CUDA-OOM degrade ladder: caps inferenceSize after an OOM.
         self._imgsz_cap = None
+        # Zoom-boost: densified sampling until this timestamp (set when a
+        # large tracked person is in frame).
+        self._boost_until = 0.0
 
         # Load detection configuration from database
         self.detection_config = db.get_camera_detection_config(camera_id)
@@ -261,8 +265,13 @@ class CameraWorker:
                                 fps_frames = 0
                                 fps_start = time.time()
 
-                            # Frame sampling
-                            if frame_count % frame_sampling == 0:
+                            # Frame sampling. During a zoom-boost window
+                            # (large tracked person in view) we sample more
+                            # densely: those are the best PPE frames.
+                            effective_sampling = frame_sampling
+                            if time.time() < self._boost_until:
+                                effective_sampling = max(3, frame_sampling // 3)
+                            if frame_count % effective_sampling == 0:
                                 self._process_frame(frame)
                     except cv2.error as e:
                         # Skip frame on OpenCV decode error to prevent crash
@@ -416,6 +425,11 @@ class CameraWorker:
         # Update database
         db.update_camera_detection(self.camera_id, person_count)
 
+        # Smart dwell: keep the patrol from switching away while someone
+        # is in view (night intrusion follows people too).
+        if person_count > 0:
+            patrol.report_person_seen(self.camera_id)
+
         # Check if alert should be triggered
         min_persons = self.detection_config.get('intrusion_min_persons', 1)
         alert_cooldown = self.detection_config.get('cooldown_seconds', 5)
@@ -562,6 +576,27 @@ class CameraWorker:
 
         db.update_camera_detection(self.camera_id, result['person_count'])
 
+        # Smart dwell + zoom boost: tell the patrol someone is in view (it
+        # will postpone preset switches) and, when the firmware autotracker
+        # has zoomed on a person (large box), densify the sampling — those
+        # are the highest-value PPE frames.
+        person_boxes_all = [d for d in result['boxes'] if d['cls_name'] == 'person']
+        if person_boxes_all:
+            patrol.report_person_seen(self.camera_id)
+            zoom_cfg = self.config.get('zoomBoost', {})
+            if not isinstance(zoom_cfg, dict):
+                zoom_cfg = {}
+            if zoom_cfg.get('enabled', True):
+                try:
+                    ratio_thr = float(zoom_cfg.get('personHeightRatio', 0.35))
+                    boost_secs = float(zoom_cfg.get('seconds', 10))
+                except (TypeError, ValueError):
+                    ratio_thr, boost_secs = 0.35, 10.0
+                frame_h = float(frame.shape[0])
+                if any((d['xyxy'][3] - d['xyxy'][1]) >= ratio_thr * frame_h
+                       for d in person_boxes_all):
+                    self._boost_until = time.time() + boost_secs
+
         if detections:
             summary = ', '.join(f"{d['cls_name']}:{d['conf']:.1%}" for d in detections)
             logger.info(
@@ -602,16 +637,43 @@ class CameraWorker:
             if set(due) & ev_types:
                 alert_frame, alert_boxes = ev_frame, ev_boxes
 
+        # Second-stage VLM verification (fail-open). A clear refutation or
+        # a no-PPE zone (parking/office) suppresses the alert; the type
+        # timestamps are stamped anyway so a persistent candidate is
+        # re-checked once per realert window, not hammered every frame.
+        vlm_note = None
+        vlm_cfg = self.config.get('vlmVerifier', {})
+        if isinstance(vlm_cfg, dict) and vlm_cfg.get('enabled', False):
+            verdict = vlm_verifier.verify(alert_frame, due, vlm_cfg)
+            if verdict is not None:
+                suppress_zones = set(vlm_cfg.get('suppressZones',
+                                                 ['parking', 'office']))
+                if not verdict.get('violation_confirmed'):
+                    logger.info(f"[{self.camera_name}] VLM veto: violation not "
+                                f"confirmed ({verdict.get('description', '')[:120]})")
+                    for t in due:
+                        self._last_type_alert[t] = now
+                    return
+                if verdict.get('zone') in suppress_zones:
+                    logger.info(f"[{self.camera_name}] VLM veto: zone "
+                                f"'{verdict.get('zone')}' is not a PPE zone "
+                                f"({verdict.get('description', '')[:120]})")
+                    for t in due:
+                        self._last_type_alert[t] = now
+                    return
+                vlm_note = verdict.get('description')
+
         alert_cooldown = self.detection_config.get('cooldown_seconds', 5)
         fired = self._trigger_alert(
             alert_frame, None, result['person_count'], 'ppe_violation',
-            alert_cooldown, due, alert_boxes
+            alert_cooldown, due, alert_boxes, extra_note=vlm_note
         )
         if fired:
             for t in due:
                 self._last_type_alert[t] = now
 
-    def _trigger_alert(self, frame, boxes, person_count, alert_type, cooldown, violations=None, processed_boxes=None):
+    def _trigger_alert(self, frame, boxes, person_count, alert_type, cooldown,
+                       violations=None, processed_boxes=None, extra_note=None):
         """Trigger alert if cooldown period has passed. Returns True if fired."""
         current_time = time.time()
 
@@ -644,7 +706,9 @@ class CameraWorker:
 
         # Log alert
         if alert_type == 'ppe_violation':
-            logger.info(f"[{self.camera_name}] PPE ALERT: {', '.join(violations)} - {person_count} person(s)")
+            note = f" | {extra_note}" if extra_note else ""
+            logger.info(f"[{self.camera_name}] PPE ALERT: {', '.join(violations)} "
+                        f"- {person_count} person(s){note}")
         else:
             logger.info(f"[{self.camera_name}] INTRUSION ALERT: {person_count} person(s) detected")
 
@@ -652,11 +716,11 @@ class CameraWorker:
         # Use cropped image for EVLOS if available, otherwise use annotated
         evlos_image_path = cropped_path if cropped_path else annotated_path
         self._send_external_alerts(boxes, person_count, avg_conf, evlos_image_path,
-                                   alert_type, processed_boxes)
+                                   alert_type, processed_boxes, extra_note)
         return True
 
     def _send_external_alerts(self, boxes, person_count, avg_conf, annotated_path,
-                              alert_type, processed_boxes=None):
+                              alert_type, processed_boxes=None, extra_note=None):
         """Send alerts to external systems (NxWitness, EVLOS)"""
         # Send alert to NxWitness if enabled
         nx_alerts_config = self.config.get("nxWitnessAlerts", {})
@@ -692,7 +756,8 @@ class CameraWorker:
                         person_count=person_count,
                         confidence=avg_conf,
                         boxes=boxes_data,
-                        image_path=annotated_path
+                        image_path=annotated_path,
+                        note=extra_note
                     )
                     if success:
                         logger.info(f"[{self.camera_name}] ✅ Alert event sent to NxWitness (with image)")

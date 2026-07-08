@@ -178,6 +178,12 @@ async def _worker_supervisor_loop():
             supervisor_last_result = result
             if result.get("revived") or result.get("still_dead"):
                 logger.warning(f"Worker supervisor: {result}")
+
+            # The PTZ patrols must ALWAYS run: revive dead patrol threads.
+            from services.ptz_patrol import patrol
+            revived_patrols = await asyncio.to_thread(patrol.ensure_alive)
+            if revived_patrols:
+                logger.warning(f"Patrol supervisor: revived {revived_patrols}")
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -23,28 +23,30 @@
     "enabled": true,
     "dwellSeconds": 60,
     "settleSeconds": 6,
-    "noPpeNameTags": [
-      "esterno",
-      "parcheggio",
-      "uffici",
-      "no-ppe"
-    ],
-    "skipPresetNames": [
-      "Home"
-    ],
+    "holdOnPersonSeconds": 20,
+    "maxHoldSeconds": 240,
+    "noPpeNameTags": ["esterno", "parcheggio", "uffici", "no-ppe"],
+    "skipPresetNames": ["Home"],
     "cameras": {
-      "Sessa 2": {
-        "enabled": true,
-        "dwellSeconds": 30
-      },
-      "Dragoni Carrello PTZ": {
-        "enabled": false
-      },
-      "Grazzanise Carrello PTZ": {
-        "enabled": false
-      }
+      "Sessa 2": {"enabled": true, "dwellSeconds": 30},
+      "Dragoni Carrello PTZ": {"enabled": false},
+      "Grazzanise Carrello PTZ": {"enabled": false}
     },
-    "description": "Patrol orchestrato: preset NX nominati; i preset con tag in noPpeNameTags non generano verdetti PPE di giorno. Sessa 2 attiva (3 preset 'parcheggio' + Saved Position 5/6); Dragoni/Grazzanise da attivare quando avranno preset nominati e tour nativo spento."
+    "description": "Patrol orchestrato: preset NX nominati; i preset con tag in noPpeNameTags non generano verdetti PPE di giorno. Smart dwell: lo switch aspetta finche' c'e' una persona in vista (autotracking), max maxHoldSeconds. Dragoni/Grazzanise PTZ da attivare quando avranno preset nominati e tour nativo spento."
+  },
+  "zoomBoost": {
+    "enabled": true,
+    "personHeightRatio": 0.35,
+    "seconds": 10,
+    "description": "Quando l'autotracker ha zoomato una persona (box alto >=35% del frame) il sampling si infittisce per 10s: sono i frame migliori per i DPI"
+  },
+  "vlmVerifier": {
+    "enabled": false,
+    "url": "http://127.0.0.1:11434",
+    "model": "qwen2.5vl:7b",
+    "timeoutSeconds": 45,
+    "suppressZones": ["parking", "office"],
+    "description": "Secondo stadio Qwen-VL via Ollama: conferma la violazione e classifica la zona prima dell'invio alert. Fail-open: se il VLM non risponde l'alert parte comunque. enabled:true dopo installazione Ollama"
   },
   "device": "cuda:0",
   "minPersons": 1,
@@ -67,11 +69,7 @@
   "vestColorOverride": {
     "enabled": false,
     "threshold": 0.2,
-    "colors": [
-      "orange",
-      "yellow",
-      "green"
-    ],
+    "colors": ["orange", "yellow", "green"],
     "description": "DISABILITATO 07/07/2026: nel backtest giudicato alla cieca ogni override sopprimeva una violazione VERA (magliette arancioni/hi-vis di terzi dentro il box novest)"
   },
   "faceBlur": {

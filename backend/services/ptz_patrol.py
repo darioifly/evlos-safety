@@ -54,9 +54,12 @@ class PatrolManager:
         self.nx = nx_client
         self.config = {}
         self._threads = {}
+        self._thread_args = {}
         self._stop = threading.Event()
         # camera_id -> {'name', 'no_ppe', 'transit_until', 'since'}
         self._scenes = {}
+        # camera_id -> last time the detection worker saw a person
+        self._person_seen = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------ config
@@ -76,6 +79,20 @@ class PatrolManager:
         return settings
 
     # ------------------------------------------------------------- state
+
+    def report_person_seen(self, camera_id: str, when=None):
+        """Called by detection workers whenever a person is in frame.
+
+        Smart dwell: the patrol postpones preset switches while someone is
+        visible, so it never yanks the camera away from a firmware
+        autotracking follow (Mobotix/AXIS zoom-and-track) or from a scene
+        with people to judge.
+        """
+        self._person_seen[camera_id] = when if when is not None else time.time()
+
+    def _person_recently_seen(self, camera_id: str, hold_seconds: float) -> bool:
+        last = self._person_seen.get(camera_id)
+        return last is not None and (time.time() - last) < hold_seconds
 
     def get_scene(self, camera_id: str):
         """Scene state for a managed camera, or None if not managed.
@@ -140,13 +157,41 @@ class PatrolManager:
             )
             t.start()
             self._threads[cam_id] = t
+            self._thread_args[cam_id] = (cam_name, settings)
             logger.info(f"PTZ patrol: started for '{cam_name}'")
+
+    def ensure_alive(self):
+        """Watchdog hook: restart any patrol thread that died.
+
+        Called from the worker supervisor loop — the patrols must ALWAYS
+        run, otherwise a camera stays parked on one scene forever.
+        Returns the list of camera names that were revived.
+        """
+        revived = []
+        if self._stop.is_set() or not self.enabled:
+            return revived
+        for cam_id, t in list(self._threads.items()):
+            if t.is_alive():
+                continue
+            cam_name, settings = self._thread_args.get(cam_id, (cam_id, {}))
+            logger.error(f"PTZ patrol: thread for '{cam_name}' died — restarting")
+            nt = threading.Thread(
+                target=self._run_camera,
+                args=(cam_id, cam_name, settings),
+                daemon=True,
+                name=f"Patrol-{cam_name}",
+            )
+            nt.start()
+            self._threads[cam_id] = nt
+            revived.append(cam_name)
+        return revived
 
     def stop(self):
         self._stop.set()
         for t in self._threads.values():
             t.join(timeout=5)
         self._threads.clear()
+        self._thread_args.clear()
         with self._lock:
             self._scenes.clear()
 
@@ -157,6 +202,14 @@ class PatrolManager:
                                    self.config.get('dwellSeconds', 60)))
         settle = float(settings.get('settleSeconds',
                                     self.config.get('settleSeconds', 6)))
+        # Smart dwell: while a person was seen in the last holdOnPersonSeconds
+        # the switch is postponed (the firmware autotracker may be following
+        # them, and interrupting a zoomed subject wastes the best PPE frames).
+        # maxHoldSeconds caps the extension so the patrol always resumes.
+        hold_person = float(settings.get('holdOnPersonSeconds',
+                                         self.config.get('holdOnPersonSeconds', 20)))
+        max_hold = float(settings.get('maxHoldSeconds',
+                                      self.config.get('maxHoldSeconds', 240)))
         tags = self.config.get('noPpeNameTags', [])
         skip_names = {n.lower() for n in self.config.get('skipPresetNames', [])}
 
@@ -205,6 +258,17 @@ class PatrolManager:
                             f"{' [no-PPE]' if is_no_ppe_scene(name, tags) else ''}")
                 if self._stop.wait(dwell):
                     return
+                # Smart dwell: postpone the switch while people are in view
+                # (autotracking may be following them), up to max_hold.
+                hold_started = time.time()
+                poll = max(0.05, min(5.0, max_hold / 4))
+                while (self._person_recently_seen(cam_id, hold_person)
+                       and time.time() - hold_started < max_hold):
+                    if self._stop.wait(poll):
+                        return
+                if time.time() - hold_started > hold_person:
+                    logger.info(f"[{cam_name}] Patrol: switch delayed "
+                                f"{time.time() - hold_started:.0f}s (person in view)")
 
 
 # Singleton, configured and started by main_sqlite at startup.

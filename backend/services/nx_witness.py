@@ -287,7 +287,7 @@ class NxWitnessClient:
 
     def send_alert(self, camera_id: str, camera_name: str = None, person_count: int = 0,
                    confidence: float = 0.0, boxes: List[Dict] = None, metadata: Dict = None,
-                   image_path: str = None) -> bool:
+                   image_path: str = None, note: str = None) -> bool:
         """
         Send alert to NxWitness as Generic Event with camera snapshot
 
@@ -325,6 +325,9 @@ class NxWitnessClient:
                 description += " (alta confidenza)"
             elif confidence >= 0.7:
                 description += " (media confidenza)"
+            if note:
+                # One-line context from the VLM verifier (what/where).
+                description += f" — {note}"
 
             # Add cameraRefs to metadata so NxWitness attaches camera snapshot
             # This is the proper way to get images in NxWitness notifications
