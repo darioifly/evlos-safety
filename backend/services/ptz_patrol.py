@@ -58,9 +58,11 @@ class PatrolManager:
         self._stop = threading.Event()
         # camera_id -> {'name', 'no_ppe', 'transit_until', 'since'}
         self._scenes = {}
-        # camera_id -> last time the detection worker saw a person
+        # camera_id -> last time the detection worker saw a (large) person
         self._person_seen = {}
         self._lock = threading.Lock()
+        # Serializes start/stop/ensure_alive (config POST vs supervisor).
+        self._lifecycle_lock = threading.Lock()
 
     # ------------------------------------------------------------ config
 
@@ -80,15 +82,17 @@ class PatrolManager:
 
     # ------------------------------------------------------------- state
 
-    def report_person_seen(self, camera_id: str, when=None):
-        """Called by detection workers whenever a person is in frame.
+    def report_person_seen(self, camera_id: str, large: bool = True, when=None):
+        """Called by detection workers when a person is in frame.
 
-        Smart dwell: the patrol postpones preset switches while someone is
-        visible, so it never yanks the camera away from a firmware
-        autotracking follow (Mobotix/AXIS zoom-and-track) or from a scene
-        with people to judge.
+        Smart dwell: the patrol postpones preset switches while a LARGE
+        person is visible (the signature of a firmware autotracking follow
+        — Mobotix/AXIS zoom-and-track). Small/distant persons do NOT hold
+        the rotation: on a busy site they are always present and holding on
+        them would collapse the patrol cycle to maxHold on every spot.
         """
-        self._person_seen[camera_id] = when if when is not None else time.time()
+        if large:
+            self._person_seen[camera_id] = when if when is not None else time.time()
 
     def _person_recently_seen(self, camera_id: str, hold_seconds: float) -> bool:
         last = self._person_seen.get(camera_id)
@@ -127,6 +131,10 @@ class PatrolManager:
     # --------------------------------------------------------- lifecycle
 
     def start(self):
+        with self._lifecycle_lock:
+            self._start_locked()
+
+    def _start_locked(self):
         if not self.enabled:
             logger.info("PTZ patrol: disabled by config")
             return
@@ -149,6 +157,9 @@ class PatrolManager:
             if not cam_id:
                 logger.warning(f"PTZ patrol: camera '{cam_name}' not found on NX, skipped")
                 continue
+            existing = self._threads.get(cam_id)
+            if existing is not None and existing.is_alive():
+                continue  # already running (idempotent re-start)
             t = threading.Thread(
                 target=self._run_camera,
                 args=(cam_id, cam_name, settings),
@@ -161,39 +172,54 @@ class PatrolManager:
             logger.info(f"PTZ patrol: started for '{cam_name}'")
 
     def ensure_alive(self):
-        """Watchdog hook: restart any patrol thread that died.
+        """Watchdog hook: restart dead patrol threads AND bootstrap patrols
+        that never started (e.g. NX Witness still booting when we came up).
 
         Called from the worker supervisor loop — the patrols must ALWAYS
         run, otherwise a camera stays parked on one scene forever.
-        Returns the list of camera names that were revived.
+        Returns the list of camera names that were (re)started.
         """
-        revived = []
-        if self._stop.is_set() or not self.enabled:
+        with self._lifecycle_lock:
+            revived = []
+            if self._stop.is_set() or not self.enabled:
+                return revived
+            enabled_cams = [n for n in (self.config.get('cameras', {}) or {})
+                            if self._camera_settings(n) is not None]
+            before = set(self._threads)
+            # Bootstrap: fewer threads than enabled cameras -> retry start()
+            # (idempotent: alive threads are skipped).
+            if len(self._threads) < len(enabled_cams):
+                self._start_locked()
+                revived.extend(
+                    self._thread_args[cid][0]
+                    for cid in set(self._threads) - before
+                )
+            # Revive: threads that died.
+            for cam_id, t in list(self._threads.items()):
+                if t.is_alive():
+                    continue
+                cam_name, settings = self._thread_args.get(cam_id, (cam_id, {}))
+                logger.error(f"PTZ patrol: thread for '{cam_name}' died — restarting")
+                nt = threading.Thread(
+                    target=self._run_camera,
+                    args=(cam_id, cam_name, settings),
+                    daemon=True,
+                    name=f"Patrol-{cam_name}",
+                )
+                nt.start()
+                self._threads[cam_id] = nt
+                revived.append(cam_name)
             return revived
-        for cam_id, t in list(self._threads.items()):
-            if t.is_alive():
-                continue
-            cam_name, settings = self._thread_args.get(cam_id, (cam_id, {}))
-            logger.error(f"PTZ patrol: thread for '{cam_name}' died — restarting")
-            nt = threading.Thread(
-                target=self._run_camera,
-                args=(cam_id, cam_name, settings),
-                daemon=True,
-                name=f"Patrol-{cam_name}",
-            )
-            nt.start()
-            self._threads[cam_id] = nt
-            revived.append(cam_name)
-        return revived
 
     def stop(self):
-        self._stop.set()
-        for t in self._threads.values():
-            t.join(timeout=5)
-        self._threads.clear()
-        self._thread_args.clear()
-        with self._lock:
-            self._scenes.clear()
+        with self._lifecycle_lock:
+            self._stop.set()
+            for t in self._threads.values():
+                t.join(timeout=5)
+            self._threads.clear()
+            self._thread_args.clear()
+            with self._lock:
+                self._scenes.clear()
 
     # -------------------------------------------------------- patrol loop
 

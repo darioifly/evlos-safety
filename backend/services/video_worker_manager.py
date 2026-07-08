@@ -79,9 +79,9 @@ class CameraWorker:
         self._last_type_alert = {}
         # Last mode actually run, to reset temporal voting on day/night flips.
         self._last_mode = None
-        # Last frame that actually contained the violations (evidence for
-        # alerts whose confirming frame happens to be clean).
-        self._violation_evidence = None
+        # Per-type: last frame that actually SHOWED each violation type
+        # (evidence for alerts whose confirming frame happens to be clean).
+        self._violation_evidence = {}
         # CUDA-OOM degrade ladder: caps inferenceSize after an OOM.
         self._imgsz_cap = None
         # Zoom-boost: densified sampling until this timestamp (set when a
@@ -267,11 +267,13 @@ class CameraWorker:
 
                             # Frame sampling. During a zoom-boost window
                             # (large tracked person in view) we sample more
-                            # densely: those are the best PPE frames.
+                            # densely: those are the best PPE frames. Never
+                            # sample LESS densely than the configured rate.
                             effective_sampling = frame_sampling
                             if time.time() < self._boost_until:
-                                effective_sampling = max(3, frame_sampling // 3)
-                            if frame_count % effective_sampling == 0:
+                                effective_sampling = min(frame_sampling,
+                                                         max(3, frame_sampling // 3))
+                            if frame_count % max(1, effective_sampling) == 0:
                                 self._process_frame(frame)
                     except cv2.error as e:
                         # Skip frame on OpenCV decode error to prevent crash
@@ -357,7 +359,7 @@ class CameraWorker:
                 logger.info(f"[{self.camera_name}] Detection mode switch: "
                             f"{self._last_mode} -> {detection_mode}")
                 self._temporal.reset()
-                self._violation_evidence = None
+                self._violation_evidence = {}
             self._last_mode = detection_mode
 
         # Inference threshold: in PPE mode run at the LOWEST per-class
@@ -576,26 +578,27 @@ class CameraWorker:
 
         db.update_camera_detection(self.camera_id, result['person_count'])
 
-        # Smart dwell + zoom boost: tell the patrol someone is in view (it
-        # will postpone preset switches) and, when the firmware autotracker
-        # has zoomed on a person (large box), densify the sampling — those
-        # are the highest-value PPE frames.
+        # Smart dwell + zoom boost. A LARGE person box is the signature of
+        # a firmware autotracking follow (Mobotix/AXIS zoom-and-track):
+        # only that holds the patrol — small/distant persons are always
+        # present on a busy site and must not stall the rotation. The same
+        # signature densifies the sampling: those are the best PPE frames.
         person_boxes_all = [d for d in result['boxes'] if d['cls_name'] == 'person']
         if person_boxes_all:
-            patrol.report_person_seen(self.camera_id)
             zoom_cfg = self.config.get('zoomBoost', {})
             if not isinstance(zoom_cfg, dict):
                 zoom_cfg = {}
-            if zoom_cfg.get('enabled', True):
-                try:
-                    ratio_thr = float(zoom_cfg.get('personHeightRatio', 0.35))
-                    boost_secs = float(zoom_cfg.get('seconds', 10))
-                except (TypeError, ValueError):
-                    ratio_thr, boost_secs = 0.35, 10.0
-                frame_h = float(frame.shape[0])
-                if any((d['xyxy'][3] - d['xyxy'][1]) >= ratio_thr * frame_h
-                       for d in person_boxes_all):
-                    self._boost_until = time.time() + boost_secs
+            try:
+                ratio_thr = float(zoom_cfg.get('personHeightRatio', 0.35))
+                boost_secs = float(zoom_cfg.get('seconds', 10))
+            except (TypeError, ValueError):
+                ratio_thr, boost_secs = 0.35, 10.0
+            frame_h = float(frame.shape[0])
+            has_large = any((d['xyxy'][3] - d['xyxy'][1]) >= ratio_thr * frame_h
+                            for d in person_boxes_all)
+            patrol.report_person_seen(self.camera_id, large=has_large)
+            if has_large and zoom_cfg.get('enabled', True):
+                self._boost_until = time.time() + boost_secs
 
         if detections:
             summary = ', '.join(f"{d['cls_name']}:{d['conf']:.1%}" for d in detections)
@@ -606,11 +609,14 @@ class CameraWorker:
                 f"ignored_bg={result['ignored_violations']}"
             )
 
-        # Keep the most recent frame that actually SHOWED a violation, so an
-        # alert confirmed on a later (clean) frame still ships real evidence.
+        # Keep the most recent frame that actually SHOWED each violation
+        # type, so an alert confirmed on a later (clean) frame still ships
+        # real evidence (per-type: mixed-type scenes must not overwrite
+        # each other's evidence).
         if result['violations']:
-            self._violation_evidence = (frame.copy(), result['boxes'],
-                                        set(result['violations']))
+            evidence = (frame.copy(), result['boxes'])
+            for viol_type in result['violations']:
+                self._violation_evidence[viol_type] = evidence
 
         # Temporal N-of-M vote: only violations that persist across several
         # analyzed frames may alert.
@@ -629,18 +635,28 @@ class CameraWorker:
         if not due:
             return
 
-        # Evidence selection: if the confirming frame does not itself show
-        # any due violation, fall back to the stored violating frame.
-        alert_frame, alert_boxes = frame, result['boxes']
-        if not (set(due) & result['violations']) and self._violation_evidence:
-            ev_frame, ev_boxes, ev_types = self._violation_evidence
-            if set(due) & ev_types:
-                alert_frame, alert_boxes = ev_frame, ev_boxes
+        # Cooldown precheck BEFORE the (expensive) VLM call: _trigger_alert
+        # would refuse anyway, and we must not spend seconds of VLM time on
+        # an alert that cannot fire.
+        alert_cooldown = self.detection_config.get('cooldown_seconds', 5)
+        if now - self.last_alert_time < alert_cooldown:
+            return
 
-        # Second-stage VLM verification (fail-open). A clear refutation or
-        # a no-PPE zone (parking/office) suppresses the alert; the type
-        # timestamps are stamped anyway so a persistent candidate is
-        # re-checked once per realert window, not hammered every frame.
+        # Evidence selection: if the confirming frame does not itself show
+        # any due violation, fall back to the stored per-type evidence.
+        alert_frame, alert_boxes = frame, result['boxes']
+        if not (set(due) & result['violations']):
+            for viol_type in due:
+                stored = self._violation_evidence.get(viol_type)
+                if stored:
+                    alert_frame, alert_boxes = stored
+                    break
+
+        # Second-stage VLM verification (fail-open). Per-type: a type the
+        # VLM refutes is dropped even when the other type is confirmed. A
+        # no-PPE zone (parking/office) suppresses everything. Suppressed
+        # types are stamped so a persistent candidate is re-checked once
+        # per realert window, not hammered every frame.
         vlm_note = None
         vlm_cfg = self.config.get('vlmVerifier', {})
         if isinstance(vlm_cfg, dict) and vlm_cfg.get('enabled', False):
@@ -648,12 +664,6 @@ class CameraWorker:
             if verdict is not None:
                 suppress_zones = set(vlm_cfg.get('suppressZones',
                                                  ['parking', 'office']))
-                if not verdict.get('violation_confirmed'):
-                    logger.info(f"[{self.camera_name}] VLM veto: violation not "
-                                f"confirmed ({verdict.get('description', '')[:120]})")
-                    for t in due:
-                        self._last_type_alert[t] = now
-                    return
                 if verdict.get('zone') in suppress_zones:
                     logger.info(f"[{self.camera_name}] VLM veto: zone "
                                 f"'{verdict.get('zone')}' is not a PPE zone "
@@ -661,9 +671,20 @@ class CameraWorker:
                     for t in due:
                         self._last_type_alert[t] = now
                     return
+                type_ok = {'vest_missing': bool(verdict.get('vest_violation')),
+                           'helmet_missing': bool(verdict.get('helmet_violation'))}
+                refuted = [t for t in due if not type_ok.get(t, True)]
+                for t in refuted:
+                    self._last_type_alert[t] = now
+                due = [t for t in due if type_ok.get(t, True)]
+                if not due or not verdict.get('violation_confirmed'):
+                    logger.info(f"[{self.camera_name}] VLM veto: violation not "
+                                f"confirmed ({verdict.get('description', '')[:120]})")
+                    for t in due:
+                        self._last_type_alert[t] = now
+                    return
                 vlm_note = verdict.get('description')
 
-        alert_cooldown = self.detection_config.get('cooldown_seconds', 5)
         fired = self._trigger_alert(
             alert_frame, None, result['person_count'], 'ppe_violation',
             alert_cooldown, due, alert_boxes, extra_note=vlm_note

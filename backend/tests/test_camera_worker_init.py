@@ -33,7 +33,7 @@ def test_init_builds_hot_path_state():
     assert w._temporal is not None
     assert w._last_type_alert == {}
     assert w._last_mode is None
-    assert w._violation_evidence is None
+    assert w._violation_evidence == {}
     assert w._imgsz_cap is None
 
 
