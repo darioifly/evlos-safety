@@ -20,7 +20,7 @@
     "Grazzanise Carrello PTZ": 600
   },
   "ptzPatrol": {
-    "enabled": false,
+    "enabled": true,
     "dwellSeconds": 60,
     "settleSeconds": 6,
     "noPpeNameTags": [
@@ -33,14 +33,18 @@
       "Home"
     ],
     "cameras": {
+      "Sessa 2": {
+        "enabled": true,
+        "dwellSeconds": 30
+      },
       "Dragoni Carrello PTZ": {
-        "enabled": true
+        "enabled": false
       },
       "Grazzanise Carrello PTZ": {
-        "enabled": true
+        "enabled": false
       }
     },
-    "description": "Patrol orchestrato: creare i preset NX con nomi parlanti sulle PTZ, DISATTIVARE il tour nativo delle camere, poi enabled:true. I preset con tag in noPpeNameTags non generano verdetti PPE di giorno."
+    "description": "Patrol orchestrato: preset NX nominati; i preset con tag in noPpeNameTags non generano verdetti PPE di giorno. Sessa 2 attiva (3 preset 'parcheggio' + Saved Position 5/6); Dragoni/Grazzanise da attivare quando avranno preset nominati e tour nativo spento."
   },
   "device": "cuda:0",
   "minPersons": 1,
