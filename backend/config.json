@@ -6,7 +6,7 @@
     "person": 0.5,
     "vest": 0.45,
     "hat": 0.45,
-    "novest": 0.75,
+    "novest": 0.6,
     "nohat": 0.7
   },
   "inferenceSize": 1280,
@@ -25,12 +25,26 @@
     "settleSeconds": 6,
     "holdOnPersonSeconds": 20,
     "maxHoldSeconds": 240,
-    "noPpeNameTags": ["esterno", "parcheggio", "uffici", "no-ppe"],
-    "skipPresetNames": ["Home"],
+    "noPpeNameTags": [
+      "esterno",
+      "parcheggio",
+      "uffici",
+      "no-ppe"
+    ],
+    "skipPresetNames": [
+      "Home"
+    ],
     "cameras": {
-      "Sessa 2": {"enabled": true, "dwellSeconds": 30},
-      "Dragoni Carrello PTZ": {"enabled": false},
-      "Grazzanise Carrello PTZ": {"enabled": false}
+      "Sessa 2": {
+        "enabled": true,
+        "dwellSeconds": 30
+      },
+      "Dragoni Carrello PTZ": {
+        "enabled": false
+      },
+      "Grazzanise Carrello PTZ": {
+        "enabled": false
+      }
     },
     "description": "Patrol orchestrato: preset NX nominati; i preset con tag in noPpeNameTags non generano verdetti PPE di giorno. Smart dwell: lo switch aspetta finche' c'e' una persona in vista (autotracking), max maxHoldSeconds. Dragoni/Grazzanise PTZ da attivare quando avranno preset nominati e tour nativo spento."
   },
@@ -41,12 +55,12 @@
     "description": "Quando l'autotracker ha zoomato una persona (box alto >=35% del frame) il sampling si infittisce per 10s: sono i frame migliori per i DPI"
   },
   "vlmVerifier": {
-    "enabled": false,
+    "enabled": true,
     "url": "http://127.0.0.1:11434",
     "model": "qwen2.5vl:7b",
-    "timeoutSeconds": 45,
-    "suppressZones": ["parking", "office"],
-    "description": "Secondo stadio Qwen-VL via Ollama: conferma la violazione e classifica la zona prima dell'invio alert. Fail-open: se il VLM non risponde l'alert parte comunque. enabled:true dopo installazione Ollama"
+    "timeoutSeconds": 30,
+    "suppressZones": [],
+    "description": "Secondo stadio Qwen-VL via Ollama (task EvlosOllama): conferma per-tipo prima dell'invio, fail-open. suppressZones vuoto di default: la zona autoritativa e' il nome del preset (patrol), la zona VLM e' troppo fuzzy (E2E 08/07: zona uffici classificata 'parking'). novest abbassato a 0.60: il VLM tiene la precisione"
   },
   "device": "cuda:0",
   "minPersons": 1,
@@ -69,7 +83,11 @@
   "vestColorOverride": {
     "enabled": false,
     "threshold": 0.2,
-    "colors": ["orange", "yellow", "green"],
+    "colors": [
+      "orange",
+      "yellow",
+      "green"
+    ],
     "description": "DISABILITATO 07/07/2026: nel backtest giudicato alla cieca ogni override sopprimeva una violazione VERA (magliette arancioni/hi-vis di terzi dentro il box novest)"
   },
   "faceBlur": {
