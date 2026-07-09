@@ -173,9 +173,17 @@ class CameraWorker:
         while not self.stop_event.is_set():
             run_started = time.time()
             try:
-                # Get stream quality from config
+                # Stream resolution: explicit "WxH" (per-camera override, else
+                # global) requests NX's primary high-res stream; falls back to
+                # the legacy quality preset. Re-read every reconnect so a
+                # config change is picked up without a full restart.
                 stream_quality = self.config.get("streamQuality", "medium")
-                stream_url = nx_client.get_stream_url(self.camera_id, quality=stream_quality)
+                by_cam = self.config.get("streamResolutionByCamera", {})
+                resolution = (by_cam.get(self.camera_name)
+                              if isinstance(by_cam, dict) else None)
+                resolution = resolution or self.config.get("streamResolution")
+                stream_url = nx_client.get_stream_url(
+                    self.camera_id, quality=stream_quality, resolution=resolution)
                 self._process_stream(stream_url)
             except Exception as e:
                 import traceback

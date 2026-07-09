@@ -202,35 +202,36 @@ class NxWitnessClient:
         return False
 
     def get_stream_url(self, camera_id: str, width: int = None, height: int = None,
-                       quality: str = None) -> str:
+                       quality: str = None, resolution: str = None) -> str:
         """
         Get MJPEG stream URL for a camera
 
         Args:
             camera_id: Camera identifier
-            width: Stream width (default from settings) - DEPRECATED if quality is set
-            height: Stream height (default from settings) - DEPRECATED if quality is set
-            quality: Stream quality preset: "low", "medium", "high", "highest" (overrides width/height)
+            width/height: legacy explicit size (DEPRECATED)
+            quality: legacy preset "low/medium/high/highest". NOTE: NX Witness
+                does NOT accept "highest" — it silently serves the low-res
+                SUBSTREAM. Prefer `resolution`.
+            resolution: explicit "WxH" (e.g. "1280x720"). Takes precedence and
+                requests the camera's PRIMARY high-res stream from NX
+                (verified: the AXIS heads serve 1080p, the Mobotix 720p).
+                Since YOLO runs at imgsz 1280 regardless, ~720p source gives
+                the model real detail on distant workers at ~the same GPU cost.
 
         Returns:
             MJPEG stream URL
         """
-        # Use the dedicated stream server (local NX Witness server)
         base_url = self.stream_server_url
-
-        # Remove curly braces from camera_id (NX Witness doesn't want them in stream URLs)
         clean_camera_id = camera_id.strip('{}')
-
-        # NX Witness MJPEG stream endpoint
-        # IMPORTANT: Use .mpjpeg (Motion JPEG) not .mjpeg
         url = f"{base_url}/media/{clean_camera_id}.mpjpeg"
 
-        # Add quality parameter if specified (NX Witness native quality control)
-        if quality and quality in ["low", "medium", "high", "highest"]:
+        if resolution and 'x' in str(resolution).lower():
+            url += f"?resolution={resolution}"
+            logger.debug(f"Generated stream URL at resolution {resolution}: {url}")
+        elif quality and quality in ["low", "medium", "high", "highest"]:
             url += f"?resolution={quality}"
             logger.debug(f"Generated stream URL with quality '{quality}': {url}")
         else:
-            # Fallback to legacy width/height (not recommended)
             width = width or settings.STREAM_WIDTH
             height = height or settings.STREAM_HEIGHT
             logger.debug(f"Generated stream URL (legacy size {width}x{height}): {url}")
