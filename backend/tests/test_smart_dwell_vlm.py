@@ -126,17 +126,28 @@ def test_vlm_verifier_parses_verdict():
     import numpy as np
     from integrations.vlm_verifier import VlmVerifier
     frame = np.zeros((100, 100, 3), dtype=np.uint8)
-    verdict_payload = {'violation_confirmed': True, 'vest_violation': True,
-                       'helmet_violation': False, 'zone': 'work_area',
-                       'people': 1, 'description': 'operaio senza gilet'}
+    verdict_payload = {'vest': 'missing', 'helmet': 'present',
+                       'zone': 'work_area', 'people_clearly_visible': 1,
+                       'description': 'operaio senza gilet'}
     with patch('integrations.vlm_verifier.requests.post',
                return_value=_vlm_response(verdict_payload)) as post:
         v = VlmVerifier().verify(frame, ['vest_missing'], {'model': 'x'})
-    assert v['violation_confirmed'] is True
+    assert v['vest'] == 'missing'
     assert v['zone'] == 'work_area'
     # The image must have been attached.
     body = post.call_args.kwargs['json']
     assert body['messages'][0]['images']
+
+
+def test_vlm_confirms_only_on_missing():
+    from integrations.vlm_verifier import VlmVerifier
+    fire = {'vest': 'missing', 'helmet': 'present'}
+    assert VlmVerifier.confirms(fire, 'vest_missing') is True
+    assert VlmVerifier.confirms(fire, 'helmet_missing') is False
+    # cannot_tell must NOT confirm — the whole point of the three-way gate.
+    unsure = {'vest': 'cannot_tell', 'helmet': 'cannot_tell'}
+    assert VlmVerifier.confirms(unsure, 'vest_missing') is False
+    assert VlmVerifier.confirms(unsure, 'helmet_missing') is False
 
 
 def test_vlm_verifier_fail_open_on_error():
@@ -156,4 +167,14 @@ def test_vlm_verifier_fail_open_on_malformed():
     resp.status_code = 200
     resp.json.return_value = {'message': {'content': 'non-json garbage'}}
     with patch('integrations.vlm_verifier.requests.post', return_value=resp):
+        assert VlmVerifier().verify(frame, ['vest_missing'], {}) is None
+
+
+def test_vlm_verifier_fail_open_on_missing_field():
+    import numpy as np
+    from integrations.vlm_verifier import VlmVerifier
+    frame = np.zeros((50, 50, 3), dtype=np.uint8)
+    # Old-schema answer (no 'vest' field) must be treated as no-opinion.
+    with patch('integrations.vlm_verifier.requests.post',
+               return_value=_vlm_response({'violation_confirmed': True})):
         assert VlmVerifier().verify(frame, ['vest_missing'], {}) is None

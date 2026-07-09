@@ -10,7 +10,7 @@
     "nohat": 0.7
   },
   "inferenceSize": 1280,
-  "minPersonHeightRatio": 0.06,
+  "minPersonHeightRatio": 0.10,
   "temporalWindow": 5,
   "temporalMinHits": 3,
   "temporalMaxAgeSeconds": 90,
@@ -56,11 +56,12 @@
   },
   "vlmVerifier": {
     "enabled": true,
+    "mode": "annotate",
     "url": "http://127.0.0.1:11434",
     "model": "qwen2.5vl:7b",
     "timeoutSeconds": 30,
     "suppressZones": [],
-    "description": "Secondo stadio Qwen-VL via Ollama (task EvlosOllama): conferma per-tipo prima dell'invio, fail-open. suppressZones vuoto di default: la zona autoritativa e' il nome del preset (patrol), la zona VLM e' troppo fuzzy (E2E 08/07: zona uffici classificata 'parking'). novest abbassato a 0.60: il VLM tiene la precisione"
+    "description": "Qwen-VL via Ollama. mode=annotate: aggiunge la descrizione all'alert ma NON filtra (misurato su 55 alert reali il 09/07: il 7B dice 'gilet presente' su 52/55, cieco alle violazioni vere → inaffidabile come gate). La precisione la tiene minPersonHeightRatio 0.10 (separa REAL vicini da UNCLEAR lontani: nel pipeline reale tiene 15/19 real, taglia 89% del rumore). mode=veto disponibile per modelli piu' grandi."
   },
   "device": "cuda:0",
   "minPersons": 1,

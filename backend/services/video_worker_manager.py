@@ -652,37 +652,40 @@ class CameraWorker:
                     alert_frame, alert_boxes = stored
                     break
 
-        # Second-stage VLM verification (fail-open). Per-type: a type the
-        # VLM refutes is dropped even when the other type is confirmed. A
-        # no-PPE zone (parking/office) suppresses everything. Suppressed
-        # types are stamped so a persistent candidate is re-checked once
-        # per realert window, not hammered every frame.
+        # Second-stage VLM (Qwen-VL via Ollama), fail-open. mode:
+        #   "annotate" (default): attach the VLM's one-line description to
+        #       the alert but NEVER suppress — measured on 55 live alerts,
+        #       the 7B model is unreliable as a gate (says "vest present" on
+        #       52/55, blind to real violations), so its verdict must not
+        #       gatekeep safety. Precision is handled by minPersonHeightRatio.
+        #   "veto": per-type three-way gate (kept for larger models / future).
+        #   "off": skip the VLM entirely.
+        # Zone suppression stays available but OFF by default (the PTZ preset
+        # name is the authoritative zone signal; the VLM zone is fuzzy).
         vlm_note = None
         vlm_cfg = self.config.get('vlmVerifier', {})
-        if isinstance(vlm_cfg, dict) and vlm_cfg.get('enabled', False):
+        mode = vlm_cfg.get('mode', 'annotate') if isinstance(vlm_cfg, dict) else 'off'
+        if isinstance(vlm_cfg, dict) and vlm_cfg.get('enabled', False) and mode != 'off':
             verdict = vlm_verifier.verify(alert_frame, due, vlm_cfg)
             if verdict is not None:
-                suppress_zones = set(vlm_cfg.get('suppressZones',
-                                                 ['parking', 'office']))
-                if verdict.get('zone') in suppress_zones:
+                vlm_note = verdict.get('description')
+                suppress_zones = set(vlm_cfg.get('suppressZones', []))
+                if suppress_zones and verdict.get('zone') in suppress_zones:
                     logger.info(f"[{self.camera_name}] VLM veto: zone "
-                                f"'{verdict.get('zone')}' is not a PPE zone "
-                                f"({verdict.get('description', '')[:120]})")
+                                f"'{verdict.get('zone')}' ({vlm_note or ''})"[:160])
                     for t in due:
                         self._last_type_alert[t] = now
                     return
-                type_ok = {'vest_missing': bool(verdict.get('vest_violation')),
-                           'helmet_missing': bool(verdict.get('helmet_violation'))}
-                refuted = [t for t in due if not type_ok.get(t, True)]
-                for t in refuted:
-                    self._last_type_alert[t] = now
-                due = [t for t in due if type_ok.get(t, True)]
-                if not due or not verdict.get('violation_confirmed'):
-                    logger.info(f"[{self.camera_name}] VLM veto: violation not "
-                                f"confirmed ({verdict.get('description', '')[:120]})")
-                    for t in due:
+                if mode == 'veto':
+                    kept = [t for t in due if vlm_verifier.confirms(verdict, t)]
+                    for t in [t for t in due if t not in kept]:
                         self._last_type_alert[t] = now
-                    return
+                    if not kept:
+                        logger.info(f"[{self.camera_name}] VLM veto: "
+                                    f"{[verdict.get('vest'), verdict.get('helmet')]} "
+                                    f"({vlm_note or ''})"[:160])
+                        return
+                    due = kept
                 vlm_note = verdict.get('description')
 
         fired = self._trigger_alert(
