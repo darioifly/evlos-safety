@@ -85,14 +85,12 @@
     "alwaysAlertOnPerson": true
   },
   "vestColorOverride": {
-    "enabled": false,
-    "threshold": 0.2,
+    "enabled": true,
+    "threshold": 0.35,
     "colors": [
-      "orange",
-      "yellow",
-      "green"
+      "teal"
     ],
-    "description": "DISABILITATO 07/07/2026: nel backtest giudicato alla cieca ogni override sopprimeva una violazione VERA (magliette arancioni/hi-vis di terzi dentro il box novest)"
+    "description": "Riabilitato 10/07/2026 SOLO per teal: il modello wesjos non riconosce i gilet verde/teal e li segna 'novest'. Misurato su frame Sessa reali: torso teal-vest 0.49-0.73, violazioni VERE 0.00, campo/erba come 'grassish' (H<75) non teal. Override su fascia torso (20-65% del box), soglia 0.35, solo su novest confidenti. NON riattivare orange/yellow (nel backtest 07/07 uccidevano violazioni vere per hi-vis di terzi)."
   },
   "faceBlur": {
     "enabled": true,

@@ -455,6 +455,13 @@ class CameraWorker:
         'orange': [((5, 120, 120), (20, 255, 255))],
         'yellow': [((20, 100, 140), (40, 255, 255))],
         'green': [((40, 100, 120), (75, 255, 255))],
+        # Teal / cyan-green hi-vis vest (H 80-100, high sat): the wesjos model
+        # does NOT recognize this colour as a vest and flags it 'novest'.
+        # Measured on real Sessa frames (10/07): teal-vested torsos read
+        # 0.49-0.73 teal while REAL violations read 0.00 and green FIELD
+        # background reads as low-sat 'grassish' (H<75), so this range is a
+        # clean, low-risk discriminator.
+        'teal': [((80, 60, 60), (100, 255, 255))],
         'red': [((0, 140, 100), (5, 255, 255)),
                 ((175, 140, 100), (180, 255, 255))],
     }
@@ -464,12 +471,14 @@ class CameraWorker:
 
     def _has_hivis_color(self, frame, box_xyxy, threshold=0.20, colors=None):
         """
-        Check whether the (unexpanded) box contains a meaningful fraction of
-        FLUORESCENT hi-vis pixels. Used to override a confident 'novest'
-        detection when the person is clearly wearing hi-vis.
+        Check whether the TORSO region of the person box contains a
+        meaningful fraction of FLUORESCENT hi-vis pixels. Used to override a
+        confident 'novest' when the person is clearly wearing hi-vis of a
+        colour the model doesn't recognize (e.g. teal vests).
 
-        Strict by design: no ROI expansion, no relaxed "distant" thresholds
-        — a wrong override here suppresses a REAL safety violation.
+        Strict by design: torso band only (central 20-65% of the box, where
+        the vest is — excludes head, legs and most background), no ROI
+        expansion — a wrong override here suppresses a REAL safety violation.
 
         Args:
             frame: BGR image (numpy array)
@@ -478,23 +487,26 @@ class CameraWorker:
             colors: iterable of range names from HIVIS_COLOR_RANGES
 
         Returns:
-            True if hi-vis colour covers at least `threshold` of the box
+            True if hi-vis colour covers at least `threshold` of the torso band
         """
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = map(int, box_xyxy)
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 <= x1 or y2 <= y1:
+        box_h = y2 - y1
+        # Central torso band: the vest sits here; skip head and legs.
+        ty1 = max(0, y1 + int(0.20 * box_h))
+        ty2 = min(h, y1 + int(0.65 * box_h))
+        x1, x2 = max(0, x1), min(w, x2)
+        if x2 <= x1 or ty2 <= ty1:
             return False
 
-        roi = frame[y1:y2, x1:x2]
+        roi = frame[ty1:ty2, x1:x2]
         total_pixels = roi.shape[0] * roi.shape[1]
         if total_pixels < self.HIVIS_MIN_ROI_PIXELS:
             # Too small to judge by colour: leave the model's verdict alone.
             return False
 
         if not colors:
-            colors = ('orange', 'yellow', 'green')
+            colors = ('teal',)
 
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         hivis_pixels = 0
@@ -507,12 +519,12 @@ class CameraWorker:
         if ratio >= threshold:
             logger.info(
                 f"[{self.camera_name}] Color override: {ratio:.1%} hi-vis "
-                f"in ROI {x2 - x1}x{y2 - y1} >= {threshold:.0%}"
+                f"({','.join(colors)}) in torso {x2 - x1}x{ty2 - ty1} >= {threshold:.0%}"
             )
             return True
         logger.debug(
             f"[{self.camera_name}] No color override: {ratio:.1%} hi-vis "
-            f"in ROI {x2 - x1}x{y2 - y1} < {threshold:.0%}"
+            f"in torso {x2 - x1}x{ty2 - ty1} < {threshold:.0%}"
         )
         return False
 
