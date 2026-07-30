@@ -2,6 +2,7 @@
 Test YOLO person detection on real camera stream
 Standalone script to verify YOLO works correctly without FastAPI
 """
+import os
 import sys
 import time
 import cv2
@@ -14,8 +15,8 @@ import torch
 CAMERA_ID = "1fcfa7bd-cc44-4d1d-2a4e-d248180effba"
 CAMERA_NAME = "Pontinia 1"
 STREAM_URL = f"http://192.168.1.31:7001/media/{CAMERA_ID}.mpjpeg"
-NX_USERNAME = "admin"
-NX_PASSWORD = "Sicurezza12!"
+NX_USERNAME = os.environ.get("NX_ADMIN_USERNAME", "admin")
+NX_PASSWORD = os.environ["NX_ADMIN_PASSWORD"]  # export it, never hardcode
 
 # YOLO configuration
 MODEL_PATH = "backend/yolov8n.pt"

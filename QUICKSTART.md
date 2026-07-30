@@ -26,7 +26,7 @@ Edit `.env` file with your NxWitness credentials:
 ```env
 NX_SERVER_URL=https://evlos.ifly.it/cameras
 NX_ADMIN_USERNAME=admin
-NX_ADMIN_PASSWORD=Sicurezza12!
+NX_ADMIN_PASSWORD=your_password_here
 ```
 
 ### 3. Start the System

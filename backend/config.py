@@ -2,8 +2,15 @@
 Configuration management for Person Detection System
 """
 import os
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+
+# .env lives next to the repo root. Resolve it from this file, NOT from the
+# working directory: a cwd-relative path silently yields an EMPTY config when
+# the app is started from anywhere but backend/, and secrets have no fallback.
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 
 class Settings(BaseSettings):
@@ -13,7 +20,9 @@ class Settings(BaseSettings):
     NX_SERVER_URL: str = "http://192.168.1.31:7001"  # API endpoint (using local server)
     NX_STREAM_SERVER_URL: str = "http://192.168.1.31:7001"  # Stream server (local)
     NX_ADMIN_USERNAME: str = "admin"
-    NX_ADMIN_PASSWORD: str = "Sicurezza12!"
+    # No default: the password belongs in .env (gitignored), never in a file
+    # that git tracks. Empty here means .env is missing or was not found.
+    NX_ADMIN_PASSWORD: str = ""
 
     # Detection Configuration
     YOLO_MODEL: str = "yolov8n.pt"
@@ -81,10 +90,16 @@ class Settings(BaseSettings):
     WORKER_SUPERVISOR_INTERVAL_SECONDS: int = 30
 
     class Config:
-        env_file = "../.env"  # .env is in parent directory
+        env_file = str(ENV_FILE)
         case_sensitive = True
 
 
 # Global settings instance
 settings = Settings()
+
+if not settings.NX_ADMIN_PASSWORD:
+    # Loud, but not fatal: the API/stream calls would fail one by one with an
+    # opaque 401 and nobody would connect that to a missing file.
+    print(f"WARNING: NX_ADMIN_PASSWORD is empty - set it in {ENV_FILE}. "
+          f"Every NxWitness call will fail with 401.")
 

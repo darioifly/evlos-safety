@@ -14,13 +14,13 @@ def client():
     c = NxWitnessClient.__new__(NxWitnessClient)  # no network in __init__
     c.stream_server_url = "http://192.168.1.31:7001"
     c.username = "admin"
-    c.password = "Sicurezza12!"
+    c.password = "s3cr3t!"
     return c
 
 
 def test_rtsp_url_strips_braces_and_keeps_port(client):
     url = client.get_rtsp_url("{01c1f42a-6045-82ca-0567-af02b6e04645}")
-    assert url == ("rtsp://admin:Sicurezza12%21@192.168.1.31:7001/"
+    assert url == ("rtsp://admin:s3cr3t%21@192.168.1.31:7001/"
                    "01c1f42a-6045-82ca-0567-af02b6e04645?stream=0")
 
 
@@ -44,13 +44,13 @@ def test_rtsp_url_defaults_port_when_missing(client):
 def test_rtsp_url_tolerates_scheme_less_setting(client):
     client.stream_server_url = "192.168.1.31:7001"
     assert client.get_rtsp_url("abc").startswith(
-        "rtsp://admin:Sicurezza12%21@192.168.1.31:7001/")
+        "rtsp://admin:s3cr3t%21@192.168.1.31:7001/")
 
 
 def test_redact_url_hides_credentials(client):
     assert redact_url(client.get_rtsp_url("abc")) == (
         "rtsp://***@192.168.1.31:7001/abc?stream=0")
-    assert "Sicurezza" not in redact_url(client.get_rtsp_url("abc"))
+    assert "s3cr3t" not in redact_url(client.get_rtsp_url("abc"))
 
 
 def test_redact_url_leaves_credential_free_urls_alone():

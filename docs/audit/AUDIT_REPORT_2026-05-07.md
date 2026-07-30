@@ -900,7 +900,7 @@ With `EVLOS_MAX_RETRIES=3` and `EVLOS_TIMEOUT=10`, a single failing alert occupi
 
 The maintainer has explicitly told the auditor that **security findings are de-prioritized** because the system is LAN-only and not internet-exposed. For completeness:
 
-- `config.py:13-16` ships an admin password `Sicurezza12!` as a default — same value also in root `.env.example:4`. If the repo ever leaves the LAN, this is the first thing that needs to change.
+- `config.py:13-16` ships the real NX admin password as a default — same value also in root `.env.example:4`. If the repo ever leaves the LAN, this is the first thing that needs to change. (Fixed 30/07/2026: both now read from the gitignored `.env`. The value itself stays in git history, so it must be rotated on the NX server.)
 - `requests.get(..., verify=False)` is used in `nx_witness.py` and `services/video_worker_manager.py:119` — accepts self-signed certs. Fine on a LAN; flag for posterity.
 - `CORSMiddleware` is `allow_origins=["*"]` in both entry points. Acceptable on a LAN.
 - `routers/alerts.py:189` does manual filename validation (`if ".." in filename or "/" in filename`) before joining with `screenshot_dir` — acceptable but `pathlib`/`os.path.normpath` would be safer.
