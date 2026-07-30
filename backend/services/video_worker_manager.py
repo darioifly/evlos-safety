@@ -1375,8 +1375,14 @@ class VideoWorkerManager:
 
         return result
 
-    def stop_worker(self, camera_id: str) -> bool:
-        """Stop worker for a camera"""
+    def stop_worker(self, camera_id: str, persist: bool = True) -> bool:
+        """Stop worker for a camera.
+
+        persist=True records the camera as disabled, which is what the toggle
+        API wants: the user asked for this camera to stay off.
+        persist=False is a runtime-only stop (shutdown): the camera must come
+        back on the next start, so the enabled flag is left alone.
+        """
         if camera_id not in self.workers:
             logger.warning(f"No worker found for camera {camera_id}")
             return False
@@ -1386,7 +1392,7 @@ class VideoWorkerManager:
         del self.workers[camera_id]
 
         # Save disabled state to database for persistence
-        if result:
+        if result and persist:
             db.set_camera_enabled(camera_id, False)
 
         return result
@@ -1432,10 +1438,17 @@ class VideoWorkerManager:
             return False
 
     def stop_all(self):
-        """Stop all workers"""
-        logger.info("Stopping all video workers...")
+        """Stop all workers WITHOUT disabling their cameras.
+
+        This runs on shutdown. Persisting enabled=False here used to wipe the
+        whole enabled set, so every restart came back with zero workers and
+        detection stayed silently off until someone re-toggled 16 cameras by
+        hand (the fps in /api/cameras/status stay stale, so it still looked
+        alive). Only an explicit user action may disable a camera.
+        """
+        logger.info("Stopping all video workers (enabled state preserved)...")
         for camera_id in list(self.workers.keys()):
-            self.stop_worker(camera_id)
+            self.stop_worker(camera_id, persist=False)
         logger.info("All video workers stopped")
 
     def _restore_worker_states(self):
@@ -1443,7 +1456,10 @@ class VideoWorkerManager:
         try:
             enabled_cameras = db.get_enabled_cameras()
             if not enabled_cameras:
-                logger.info("No cameras were previously enabled")
+                # Not an ordinary state: after a normal shutdown the enabled
+                # set survives, so an empty one means nothing will be watched.
+                logger.warning("No cameras are enabled - NO detection will run. "
+                               "Enable them via POST /api/cameras/{id}/toggle.")
                 return
 
             logger.info(f"Restoring {len(enabled_cameras)} camera worker(s) from previous session...")
@@ -1457,20 +1473,24 @@ class VideoWorkerManager:
                     worker = self._start_worker_for_camera(camera_id, camera_name)
                     success = worker.running
 
+                    # A failed restore leaves the camera ENABLED on purpose: a
+                    # transient failure (NX still booting, camera offline for
+                    # an hour) must not silently drop it from the watch list
+                    # forever. The worker's own retry loop and the next restart
+                    # both get another go.
                     if success:
                         logger.info(f"✓ Restored worker for camera: {camera_name}")
                     else:
-                        logger.warning(f"✗ Failed to restore worker for camera: {camera_name}")
-                        # Remove from enabled list if failed to start
-                        db.set_camera_enabled(camera_id, False)
+                        logger.warning(f"✗ Failed to restore worker for camera: "
+                                       f"{camera_name} (stays enabled, will retry)")
 
                     # Add delay between worker starts to prevent memory spikes
                     if i < len(enabled_cameras) - 1:
                         time.sleep(1.0)  # 1 second delay between each worker start
 
                 except Exception as e:
-                    logger.error(f"Error restoring worker for {camera_name}: {e}")
-                    db.set_camera_enabled(camera_id, False)
+                    logger.error(f"Error restoring worker for {camera_name}: {e} "
+                                 f"(stays enabled, will retry)")
 
             logger.info("Worker state restoration completed")
         except Exception as e:
