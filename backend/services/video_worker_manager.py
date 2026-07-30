@@ -2,6 +2,7 @@
 Dynamic Video Worker Manager
 Manages per-camera video processing threads that can be started/stopped on demand
 """
+import os
 import threading
 import time
 import cv2
@@ -16,10 +17,33 @@ from config import settings
 from utils.logger import logger
 from database import db
 from services import ppe_logic
-from services.nx_witness import nx_client
+from services.nx_witness import nx_client, redact_url
 from services.ptz_patrol import patrol
 from integrations.evlos_client import evlos_client
 from integrations.vlm_verifier import vlm_verifier
+
+
+# RTSP is the default transport (see nx_witness.get_rtsp_url for why). OpenCV's
+# FFmpeg backend reads these options when a capture is OPENED, not at import,
+# so setting the variable here covers every worker.
+#   rtsp_transport;tcp -> no UDP packet loss on a 15-stream LAN pull
+#   timeout;5000000    -> 5s socket timeout, otherwise a dead peer blocks
+#                         read() forever and the worker never reconnects
+RTSP_CAPTURE_OPTIONS = os.environ.get(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|timeout;5000000")
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = RTSP_CAPTURE_OPTIONS
+
+
+def _parse_resolution(value):
+    """'WxH' -> (w, h). None / garbage -> None (no resize)."""
+    if not value or 'x' not in str(value).lower():
+        return None
+    try:
+        width, height = str(value).lower().split('x', 1)
+        width, height = int(width), int(height)
+    except (TypeError, ValueError):
+        return None
+    return (width, height) if width > 0 and height > 0 else None
 
 
 # F-002: MJPEG parsing hardening.
@@ -174,17 +198,25 @@ class CameraWorker:
             run_started = time.time()
             try:
                 # Stream resolution: explicit "WxH" (per-camera override, else
-                # global) requests NX's primary high-res stream; falls back to
-                # the legacy quality preset. Re-read every reconnect so a
-                # config change is picked up without a full restart.
+                # global). Under RTSP it is the size we downscale to locally;
+                # under MJPEG it is what we ask NX to transcode to. Re-read
+                # every reconnect so a config change is picked up without a
+                # full restart.
                 stream_quality = self.config.get("streamQuality", "medium")
                 by_cam = self.config.get("streamResolutionByCamera", {})
                 resolution = (by_cam.get(self.camera_name)
                               if isinstance(by_cam, dict) else None)
                 resolution = resolution or self.config.get("streamResolution")
-                stream_url = nx_client.get_stream_url(
-                    self.camera_id, quality=stream_quality, resolution=resolution)
-                self._process_stream(stream_url)
+
+                transport = str(self.config.get("streamTransport", "rtsp")).lower()
+                if transport == "rtsp":
+                    rtsp_url = nx_client.get_rtsp_url(
+                        self.camera_id, self._cfg_int("rtspStreamIndex", 0))
+                    self._process_stream_rtsp(rtsp_url, target_resolution=resolution)
+                else:
+                    stream_url = nx_client.get_stream_url(
+                        self.camera_id, quality=stream_quality, resolution=resolution)
+                    self._process_stream(stream_url)
             except Exception as e:
                 import traceback
                 logger.error(f"[{self.camera_name}] Error in worker: {e}\n{traceback.format_exc()}")
@@ -217,8 +249,110 @@ class CameraWorker:
                     break
                 time.sleep(0.1)
 
+    def _boost_factor(self) -> float:
+        """How much denser we sample inside a zoom-boost window (a large tracked
+        person in view produces the best PPE frames). 1.0 = no boost."""
+        if time.time() >= self._boost_until:
+            return 1.0
+        return max(1.0, self._cfg_float('analysisFpsBoostFactor', 3.0))
+
+    def _analysis_interval(self) -> float:
+        """Seconds between analyzed frames, from config analysisFps."""
+        fps = self._cfg_float('analysisFps', 0.5)
+        return 1.0 / fps if fps > 0 else 0.0
+
+    def _effective_sampling(self, frame_sampling: int) -> int:
+        """MJPEG-path 1-in-N sampling, densified during a zoom-boost window.
+        Never sparser than the configured rate."""
+        if time.time() < self._boost_until:
+            return min(frame_sampling, max(3, frame_sampling // 3))
+        return frame_sampling
+
+    def _process_stream_rtsp(self, rtsp_url: str, target_resolution: str = None):
+        """Process camera stream over RTSP - no server-side transcoding.
+
+        Same contract as _process_stream: keeps camera_status/fps in sync,
+        honours the zoom-boost window, hands BGR frames to _process_frame.
+        Returning means "stream over": the caller reconnects with backoff.
+
+        target_resolution ("WxH") downscales the analyzed frame to what the
+        MJPEG endpoint used to deliver, so thresholds tuned against a 720p
+        source stay valid now that RTSP carries the camera's native size.
+
+        Sampling is time-based here, not 1-in-N: NX's MJPEG endpoint delivered
+        ~5 fps while RTSP carries the camera's native ~25 fps, so keeping the
+        frameSampling ratio would have quintupled inferences and alerts.
+        analysisFps pins the analyzed rate to what the MJPEG era produced,
+        independent of how fast the camera actually streams.
+        """
+        logger.info(f"[{self.camera_name}] Connecting to RTSP stream "
+                    f"{redact_url(rtsp_url)}")
+        cap = None
+        try:
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                logger.error(f"[{self.camera_name}] Failed to open RTSP stream")
+                db.upsert_camera_status(self.camera_id, self.camera_name, stream_connected=False)
+                return
+
+            logger.info(f"[{self.camera_name}] Connected to RTSP stream")
+            db.upsert_camera_status(self.camera_id, self.camera_name, stream_connected=True)
+
+            target_size = _parse_resolution(target_resolution)
+            fps_start = time.time()
+            fps_frames = 0
+            analysis_interval = self._analysis_interval()
+            next_analysis_at = 0.0
+
+            while not self.stop_event.is_set():
+                # grab() advances the stream without the BGR conversion, so the
+                # ~9 frames out of 10 we drop cost only their decode. retrieve()
+                # below pays for the colour conversion on the ones we analyze.
+                if not cap.grab():
+                    logger.warning(f"[{self.camera_name}] RTSP stream ended or timed out")
+                    db.upsert_camera_status(self.camera_id, self.camera_name,
+                                            stream_connected=False)
+                    return
+
+                fps_frames += 1
+                now = time.time()
+
+                # Update FPS every 5 seconds (this is the STREAM rate, ~25 fps
+                # native, not the analysis rate).
+                if now - fps_start >= 5.0:
+                    db.upsert_camera_status(self.camera_id, self.camera_name,
+                                            stream_connected=True,
+                                            fps=fps_frames / (now - fps_start))
+                    fps_frames = 0
+                    fps_start = now
+
+                if now < next_analysis_at:
+                    continue
+                next_analysis_at = now + (analysis_interval / self._boost_factor())
+
+                ok, frame = cap.retrieve()
+                if not ok or frame is None:
+                    continue
+
+                if target_size and (frame.shape[1], frame.shape[0]) != target_size:
+                    frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+
+                self._process_frame(frame)
+
+            logger.info(f"[{self.camera_name}] Stop requested, exiting RTSP stream")
+        except cv2.error as e:
+            logger.warning(f"[{self.camera_name}] RTSP decode error: {e}")
+            db.upsert_camera_status(self.camera_id, self.camera_name, stream_connected=False)
+        except Exception as e:
+            logger.error(f"[{self.camera_name}] RTSP stream error: {e}")
+            db.upsert_camera_status(self.camera_id, self.camera_name, stream_connected=False)
+        finally:
+            if cap is not None:
+                cap.release()
+
     def _process_stream(self, stream_url: str):
-        """Process camera stream"""
+        """Process camera stream over MJPEG (legacy transport, see
+        nx_witness.get_stream_url: it costs the VMS a transcode per frame)."""
         logger.info(f"[{self.camera_name}] Connecting to stream...")
 
         try:
@@ -273,14 +407,7 @@ class CameraWorker:
                                 fps_frames = 0
                                 fps_start = time.time()
 
-                            # Frame sampling. During a zoom-boost window
-                            # (large tracked person in view) we sample more
-                            # densely: those are the best PPE frames. Never
-                            # sample LESS densely than the configured rate.
-                            effective_sampling = frame_sampling
-                            if time.time() < self._boost_until:
-                                effective_sampling = min(frame_sampling,
-                                                         max(3, frame_sampling // 3))
+                            effective_sampling = self._effective_sampling(frame_sampling)
                             if frame_count % max(1, effective_sampling) == 0:
                                 self._process_frame(frame)
                     except cv2.error as e:
@@ -1121,7 +1248,8 @@ class VideoWorkerManager:
                 "frameSampling": 10,
                 "streamWidth": 640,
                 "streamHeight": 480,
-                "streamQuality": "medium"
+                "streamQuality": "medium",
+                "streamTransport": "rtsp"
             }
 
         # Load YOLO model

@@ -2,11 +2,13 @@
 NxWitness API Client
 """
 import base64
+import re
 import time
 import json
 import uuid
 import os
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote, urlparse
 import requests
 from requests.auth import HTTPBasicAuth
 import cv2
@@ -14,6 +16,13 @@ import numpy as np
 
 from config import settings
 from utils.logger import logger
+
+
+# RTSP needs the credentials inside the URL (FFmpeg has no auth callback), so
+# every URL that reaches a log line must go through this first.
+def redact_url(url: str) -> str:
+    """Replace the userinfo part of a URL with '***'."""
+    return re.sub(r'//[^/@]*@', '//***@', url or '')
 
 
 class NxWitnessClient:
@@ -201,10 +210,46 @@ class NxWitnessClient:
         # This is safer than assuming online for cameras that might not be working
         return False
 
+    def get_rtsp_url(self, camera_id: str, stream_index: int = 0) -> str:
+        """
+        Get the RTSP URL for a camera. NX serves RTSP on its HTTP port (7001).
+
+        RTSP is a passthrough: NX relays the camera's native H.264 untouched.
+        The MJPEG endpoint (`get_stream_url`) instead makes NX decode, rescale
+        and JPEG-encode every frame. Measured on the .31 VMS host, 30/07/2026:
+        ~0.63 CPU cores per MJPEG stream versus ~0.04 per RTSP stream, i.e.
+        9.4 cores of 16 burnt just to feed 15 detection workers.
+
+        Args:
+            camera_id: Camera identifier (braces optional)
+            stream_index: 0 = primary (native resolution), 1 = secondary substream
+
+        Returns:
+            RTSP URL with credentials embedded - log it via redact_url() only.
+        """
+        # A scheme-less setting ("192.168.1.31:7001") would otherwise parse the
+        # host as the scheme and the port as the path; '//' forces a netloc.
+        raw = (self.stream_server_url or '').strip()
+        if '://' not in raw:
+            raw = f"//{raw.lstrip('/')}"
+        # Strip any credentials already present in the configured URL.
+        host = urlparse(raw).netloc.rsplit('@', 1)[-1].strip('/')
+        if ':' not in host:
+            host = f"{host}:7001"
+        creds = f"{quote(self.username, safe='')}:{quote(self.password, safe='')}"
+        clean_camera_id = camera_id.strip('{}')
+        url = f"rtsp://{creds}@{host}/{clean_camera_id}?stream={int(stream_index)}"
+        logger.debug(f"Generated RTSP URL (stream={stream_index}): {redact_url(url)}")
+        return url
+
     def get_stream_url(self, camera_id: str, width: int = None, height: int = None,
                        quality: str = None, resolution: str = None) -> str:
         """
-        Get MJPEG stream URL for a camera
+        Get MJPEG stream URL for a camera.
+
+        DEPRECATED as the live-detection transport: it costs the VMS a full
+        decode + rescale + JPEG encode per frame (see get_rtsp_url). Kept as
+        the fallback behind config `streamTransport: "mjpeg"`.
 
         Args:
             camera_id: Camera identifier
